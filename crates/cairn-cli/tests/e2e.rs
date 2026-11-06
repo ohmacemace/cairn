@@ -1,3 +1,4 @@
+use cairn_core::paths::paths_equivalent;
 use serde_json::{json, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -192,7 +193,20 @@ fn claude_push_pull_restore_round_trip() {
         .join(format!("{id}.jsonl"));
     assert!(restored.exists(), "missing {}", restored.display());
     let text = fs::read_to_string(&restored).unwrap();
-    assert!(text.contains(&project_b.to_string_lossy().to_string()));
+    let restored_cwd = text
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find_map(|value| {
+            value
+                .get("cwd")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned)
+        })
+        .expect("restored session should contain a cwd");
+    assert!(paths_equivalent(
+        &restored_cwd,
+        project_b.to_string_lossy().as_ref()
+    ));
     assert!(!text.contains("__CAIRN_CWD__"));
 }
 
