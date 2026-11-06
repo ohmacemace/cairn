@@ -171,9 +171,17 @@ pub fn rewrite_cwd(content: &[u8], old: &str, new: &str) -> Vec<u8> {
     }
 
     let mut out = Vec::with_capacity(content.len());
-    for line in content.split(|b| *b == b'\n') {
+    for chunk in content.split_inclusive(|b| *b == b'\n') {
+        let has_newline = chunk.last() == Some(&b'\n');
+        let line = if has_newline {
+            &chunk[..chunk.len() - 1]
+        } else {
+            chunk
+        };
         if line.is_empty() {
-            out.push(b'\n');
+            if has_newline {
+                out.push(b'\n');
+            }
             continue;
         }
         match serde_json::from_slice::<Value>(line) {
@@ -182,13 +190,14 @@ pub fn rewrite_cwd(content: &[u8], old: &str, new: &str) -> Vec<u8> {
                 if serde_json::to_writer(&mut out, &value).is_err() {
                     out.extend_from_slice(line);
                 }
-                out.push(b'\n');
             }
             Err(_) => {
                 let text = String::from_utf8_lossy(line);
                 out.extend_from_slice(text.replace(old, new).as_bytes());
-                out.push(b'\n');
             }
+        }
+        if has_newline {
+            out.push(b'\n');
         }
     }
     out
@@ -217,20 +226,26 @@ fn rewrite_value(value: &mut Value, old: &str, new: &str) {
 
 pub fn clean_title(text: &str) -> String {
     for line in text.lines() {
-        let stripped = strip_tags(line);
-        let trimmed = stripped.trim();
-        if trimmed.is_empty() {
+        if is_command_text(line) {
             continue;
         }
-        if trimmed.starts_with("Caveat:")
-            || trimmed.starts_with("This session is being continued")
-            || trimmed.starts_with("Set effort level")
-        {
+        let stripped = strip_tags(line);
+        let trimmed = stripped.trim();
+        if trimmed.is_empty() || is_command_text(trimmed) {
             continue;
         }
         return truncate_chars(trimmed, 80);
     }
     "Untitled session".to_string()
+}
+
+pub fn is_command_text(text: &str) -> bool {
+    let trimmed = text.trim_start();
+    trimmed.starts_with("<local-command")
+        || trimmed.starts_with("<command-")
+        || trimmed.starts_with("The command below was run directly in Claude Code")
+        || trimmed.starts_with("Set effort level")
+        || trimmed.starts_with("This session is being continued")
 }
 
 fn strip_tags(input: &str) -> String {
@@ -293,4 +308,22 @@ pub fn project_identity(cwd: &Path) -> (String, Option<String>, Option<String>) 
     let remote = info.remote.as_deref().and_then(normalize_git_remote);
     let key = project_key(cwd, remote.as_deref());
     (key, remote, info.branch)
+}
+
+pub const CWD_PLACEHOLDER: &str = "__CAIRN_CWD__";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cwd_placeholder_round_trips() {
+        let raw = b"{\"cwd\":\"/home/a/proj\",\"text\":\"/home/a/proj foo\"}\n";
+        let canonical = rewrite_cwd(raw, "/home/a/proj", CWD_PLACEHOLDER);
+        let restored = rewrite_cwd(&canonical, CWD_PLACEHOLDER, "/home/b/proj");
+        assert_eq!(
+            String::from_utf8(restored).unwrap(),
+            "{\"cwd\":\"/home/b/proj\",\"text\":\"/home/b/proj foo\"}\n"
+        );
+    }
 }

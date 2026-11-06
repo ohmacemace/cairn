@@ -1,4 +1,4 @@
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
@@ -12,8 +12,8 @@ use crate::model::{
     BUNDLE_SCHEMA,
 };
 use crate::paths::{
-    claude_project_dir_for, clean_title, file_mtime, now_ts, parse_timestamp, project_identity,
-    rewrite_cwd,
+    claude_project_dir_for, clean_title, file_mtime, is_command_text, now_ts, parse_timestamp,
+    project_identity, rewrite_cwd, CWD_PLACEHOLDER,
 };
 
 const DROP_TYPES: &[&str] = &[
@@ -142,12 +142,15 @@ impl ClaudeAdapter {
             .max(file_mtime(path));
         let title = title.unwrap_or_else(|| native_id.clone());
 
+        let canonical_raw = rewrite_cwd(&raw, &cwd, CWD_PLACEHOLDER);
         let content = match self.save.mode {
             SaveMode::Index => Vec::new(),
-            SaveMode::Standard => {
-                standardize(&raw, self.save.max_text_block_bytes, self.save.attachments)
-            }
-            SaveMode::Full => raw.clone(),
+            SaveMode::Standard => standardize(
+                &canonical_raw,
+                self.save.max_text_block_bytes,
+                self.save.attachments,
+            ),
+            SaveMode::Full => canonical_raw,
         };
 
         let sidecars = if self.save.mode == SaveMode::Full {
@@ -155,6 +158,8 @@ impl ClaudeAdapter {
         } else {
             Vec::new()
         };
+
+        let content_hash = sha256_hex(&content);
 
         let meta = SessionMeta {
             schema: BUNDLE_SCHEMA,
@@ -175,7 +180,7 @@ impl ClaudeAdapter {
             pinned: false,
             machine_id: self.machine.id.clone(),
             machine_name: self.machine.name.clone(),
-            content_hash: sha256_hex(&content),
+            content_hash,
             size_bytes: content.len() as u64,
             source_path: None,
             parent_timeline: None,
@@ -265,7 +270,11 @@ impl AgentAdapter for ClaudeAdapter {
 
         let old_cwd = &record.meta.cwd;
         let new_cwd = target_cwd.to_string_lossy().to_string();
-        let content = rewrite_cwd(&record.content, old_cwd, &new_cwd);
+        let content = rewrite_cwd(
+            &rewrite_cwd(&record.content, CWD_PLACEHOLDER, &new_cwd),
+            old_cwd,
+            &new_cwd,
+        );
 
         let project_dir = claude_project_dir_for(&self.home, target_cwd);
         std::fs::create_dir_all(&project_dir)?;
@@ -337,7 +346,7 @@ fn extract_user_text(value: &Value) -> Option<String> {
                     }
                 }
             }
-            if out.is_empty() {
+            if out.is_empty() || is_command_text(&out) {
                 None
             } else {
                 Some(out)
@@ -349,19 +358,44 @@ fn extract_user_text(value: &Value) -> Option<String> {
 
 fn standardize(raw: &[u8], max_text: usize, keep_attachments: bool) -> Vec<u8> {
     let mut out = Vec::with_capacity(raw.len());
-    for line in raw.split(|b| *b == b'\n') {
+    for chunk in raw.split_inclusive(|b| *b == b'\n') {
+        let has_newline = chunk.last() == Some(&b'\n');
+        let line = if has_newline {
+            &chunk[..chunk.len() - 1]
+        } else {
+            chunk
+        };
         if line.is_empty() {
-            out.push(b'\n');
+            if has_newline {
+                out.push(b'\n');
+            }
             continue;
         }
         let Ok(mut value) = serde_json::from_slice::<Value>(line) else {
             out.extend_from_slice(line);
-            out.push(b'\n');
+            if has_newline {
+                out.push(b'\n');
+            }
             continue;
         };
-        let kind = value.get("type").and_then(Value::as_str).unwrap_or("");
-        if DROP_TYPES.contains(&kind) || (kind == "attachment" && !keep_attachments) {
+        let kind = value
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        if DROP_TYPES.contains(&kind.as_str()) {
             continue;
+        }
+        if kind == "attachment" && !keep_attachments {
+            // The attachment line is a node in Claude's parentUuid chain.
+            // Keep the node, but strip the payload.
+            if let Value::Object(map) = &mut value {
+                map.insert("attachment".to_string(), json!({ "type": "cairn_omitted" }));
+                map.insert(
+                    "rendered".to_string(),
+                    Value::String("[attachment omitted by cairn]".into()),
+                );
+            }
         }
         if kind == "user" || kind == "assistant" {
             truncate_value(&mut value, max_text);
@@ -369,7 +403,9 @@ fn standardize(raw: &[u8], max_text: usize, keep_attachments: bool) -> Vec<u8> {
         if serde_json::to_writer(&mut out, &value).is_err() {
             out.extend_from_slice(line);
         }
-        out.push(b'\n');
+        if has_newline {
+            out.push(b'\n');
+        }
     }
     out
 }

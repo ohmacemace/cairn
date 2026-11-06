@@ -3,6 +3,7 @@ use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use walkdir::WalkDir;
 
 use crate::adapters::AgentAdapter;
 use crate::config::{write_atomic, SaveConfig};
@@ -11,7 +12,7 @@ use crate::hash::sha256_hex;
 use crate::model::{
     Agent, ImportOutcome, MachineInfo, SaveMode, SessionMeta, SessionRecord, BUNDLE_SCHEMA,
 };
-use crate::paths::{now_ts, project_identity, rewrite_cwd};
+use crate::paths::{now_ts, project_identity, rewrite_cwd, CWD_PLACEHOLDER};
 
 #[derive(Debug, Clone)]
 pub struct CodexAdapter {
@@ -42,6 +43,11 @@ impl AgentAdapter for CodexAdapter {
     }
 
     fn discover(&self) -> Result<Vec<SessionRecord>> {
+        let sessions = self.sessions_dir();
+        if !sessions.exists() || !has_rollouts(&sessions) {
+            return Ok(Vec::new());
+        }
+
         let mut client = AppServer::spawn(&self.home, &self.bin)?;
         client.initialize()?;
         let threads = client.list_threads()?;
@@ -56,14 +62,16 @@ impl AgentAdapter for CodexAdapter {
                 continue;
             }
             let raw = std::fs::read(&path)?;
+            let canonical_raw = rewrite_cwd(&raw, &thread.cwd, CWD_PLACEHOLDER);
             let content = match self.save.mode {
                 SaveMode::Index => Vec::new(),
                 // Codex boilerplate (tool definitions, base instructions) is not
                 // trimmed yet: it needs a live resume test to validate.
-                SaveMode::Standard | SaveMode::Full => raw,
+                SaveMode::Standard | SaveMode::Full => canonical_raw,
             };
 
             let (project_key, git_remote, git_branch) = project_identity(Path::new(&thread.cwd));
+            let content_hash = sha256_hex(&content);
             let source_path = path
                 .strip_prefix(self.sessions_dir())
                 .ok()
@@ -92,7 +100,7 @@ impl AgentAdapter for CodexAdapter {
                 pinned: false,
                 machine_id: self.machine.id.clone(),
                 machine_name: self.machine.name.clone(),
-                content_hash: sha256_hex(&content),
+                content_hash,
                 size_bytes: content.len() as u64,
                 source_path,
                 parent_timeline: None,
@@ -120,7 +128,11 @@ impl AgentAdapter for CodexAdapter {
         }
 
         let new_cwd = target_cwd.to_string_lossy().to_string();
-        let content = rewrite_cwd(&record.content, &record.meta.cwd, &new_cwd);
+        let content = rewrite_cwd(
+            &rewrite_cwd(&record.content, CWD_PLACEHOLDER, &new_cwd),
+            &record.meta.cwd,
+            &new_cwd,
+        );
 
         let target = if let Some(rel) = &record.meta.source_path {
             self.sessions_dir().join(rel)
@@ -382,4 +394,15 @@ impl Drop for AppServer {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
+}
+
+fn has_rollouts(dir: &Path) -> bool {
+    WalkDir::new(dir)
+        .max_depth(6)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .any(|e| {
+            e.file_type().is_file()
+                && e.path().extension().and_then(|s| s.to_str()) == Some("jsonl")
+        })
 }
