@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = ["crates/cairn-core", "crates/cairn-cli"]
+exclude = ["src-tauri"]
 
 [workspace.package]
 version = "0.1.0"
