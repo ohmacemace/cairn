@@ -1,11 +1,11 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::str::FromStr;
 
 use cairn_core::config::{Config, WslSource};
 use cairn_core::git;
 use cairn_core::model::{Agent, SaveMode, SessionMeta};
-use cairn_core::paths::expand_tilde;
+use cairn_core::paths::{expand_tilde, project_identity};
 use cairn_core::store::Store;
 use cairn_core::sync::SyncEngine;
 use serde::{Deserialize, Serialize};
@@ -25,10 +25,11 @@ struct WslSourceView {
     claude_home: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct PathMappingView {
+struct RepositoryView {
     key: String,
+    remote: Option<String>,
     path: String,
 }
 
@@ -41,7 +42,7 @@ struct ConfigView {
     save_mode: String,
     agents: AgentSettings,
     wsl: Vec<WslSourceView>,
-    paths: Vec<PathMappingView>,
+    repositories: Vec<RepositoryView>,
 }
 
 impl ConfigView {
@@ -68,11 +69,12 @@ impl ConfigView {
                     claude_home: source.claude_home.clone(),
                 })
                 .collect(),
-            paths: config
+            repositories: config
                 .paths
                 .iter()
-                .map(|(key, path)| PathMappingView {
+                .map(|(key, path)| RepositoryView {
                     key: key.clone(),
+                    remote: key.strip_prefix("git:").map(ToOwned::to_owned),
                     path: path.clone(),
                 })
                 .collect(),
@@ -98,6 +100,8 @@ struct SessionView {
     machine_name: String,
     local: bool,
     remote: bool,
+    cwd_exists: bool,
+    mapped_cwd: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -162,7 +166,19 @@ fn load_config() -> Result<Config, String> {
     Config::load().map_err(err)
 }
 
-fn session_view(meta: &SessionMeta, local: bool, remote: bool) -> SessionView {
+fn session_view(meta: &SessionMeta, local: bool, remote: bool, config: &Config) -> SessionView {
+    let original = PathBuf::from(&meta.cwd);
+    let resolved = config.resolve_cwd(meta);
+    let cwd_exists = if meta.wsl_distro.is_some() {
+        true
+    } else {
+        original.exists() || resolved.exists()
+    };
+    let mapped_cwd = if resolved != original {
+        Some(resolved.to_string_lossy().to_string())
+    } else {
+        None
+    };
     SessionView {
         id: meta.native_id.clone(),
         timeline_id: meta.timeline_id.clone(),
@@ -179,6 +195,8 @@ fn session_view(meta: &SessionMeta, local: bool, remote: bool) -> SessionView {
         machine_name: meta.machine_name.clone(),
         local,
         remote,
+        cwd_exists,
+        mapped_cwd,
     }
 }
 
@@ -248,6 +266,28 @@ async fn get_config() -> Result<Option<ConfigView>, String> {
     .await
 }
 
+fn ensure_store(store: &Path, remote: Option<&str>) -> Result<(), String> {
+    if !store.join(".git").exists() {
+        let mut cloned = false;
+        if let Some(url) = remote {
+            if !store.exists() {
+                let output = Command::new("git")
+                    .arg("clone")
+                    .arg(url)
+                    .arg(store)
+                    .output();
+                cloned = matches!(output, Ok(output) if output.status.success());
+            }
+        }
+        if !cloned {
+            Store::init(store).map_err(err)?;
+            git::init(store, remote, "main").map_err(err)?;
+        }
+    }
+    Store::init(store).map_err(err)?;
+    Ok(())
+}
+
 #[tauri::command]
 async fn init_store(
     store_path: String,
@@ -256,25 +296,7 @@ async fn init_store(
 ) -> Result<ConfigView, String> {
     blocking(move || {
         let store = expand_tilde(&store_path);
-        if !store.join(".git").exists() {
-            let mut cloned = false;
-            if let Some(url) = &remote {
-                if !store.exists() {
-                    let output = Command::new("git")
-                        .arg("clone")
-                        .arg(url)
-                        .arg(&store)
-                        .output();
-                    cloned = matches!(output, Ok(output) if output.status.success());
-                }
-            }
-            if !cloned {
-                Store::init(&store).map_err(err)?;
-                git::init(&store, remote.as_deref(), "main").map_err(err)?;
-            }
-        }
-
-        Store::init(&store).map_err(err)?;
+        ensure_store(&store, remote.as_deref())?;
         let config = Config::default_for(
             store.to_string_lossy().to_string(),
             non_empty(remote),
@@ -294,6 +316,30 @@ async fn init_store(
 }
 
 #[tauri::command]
+async fn update_store(
+    store_path: String,
+    remote: Option<String>,
+    machine_name: Option<String>,
+) -> Result<ConfigView, String> {
+    blocking(move || {
+        let mut config = load_config()?;
+        let store = expand_tilde(&store_path);
+        ensure_store(&store, remote.as_deref())?;
+        config.store.path = store.to_string_lossy().to_string();
+        config.store.remote = non_empty(remote);
+        if let Some(name) = machine_name {
+            let name = name.trim();
+            if !name.is_empty() {
+                config.machine_name = name.to_string();
+            }
+        }
+        config.save().map_err(err)?;
+        Ok(ConfigView::from_config(&config))
+    })
+    .await
+}
+
+#[tauri::command]
 async fn list_sessions() -> Result<ScanView, String> {
     blocking(|| {
         let config = load_config()?;
@@ -302,7 +348,7 @@ async fn list_sessions() -> Result<ScanView, String> {
         Ok(ScanView {
             sessions: entries
                 .iter()
-                .map(|entry| session_view(&entry.meta, entry.local, entry.remote))
+                .map(|entry| session_view(&entry.meta, entry.local, entry.remote, &engine.config))
                 .collect(),
             warnings,
         })
@@ -368,10 +414,11 @@ async fn restore_session(
     timeline_id: Option<String>,
     agent: Option<String>,
     cwd: Option<String>,
+    remember: bool,
 ) -> Result<RestoreView, String> {
     blocking(move || {
         let config = load_config()?;
-        let engine = SyncEngine::new(config).map_err(err)?;
+        let mut engine = SyncEngine::new(config).map_err(err)?;
         let parsed_agent = agent
             .as_deref()
             .map(Agent::from_str)
@@ -407,6 +454,21 @@ async fn restore_session(
             .map(resume_hint)
             .unwrap_or_else(|| fallback_hint(parsed_agent, &outcome.native_id));
 
+        if remember {
+            if let Some(meta) = &meta {
+                let target = cwd_path
+                    .clone()
+                    .unwrap_or_else(|| engine.config.resolve_cwd(meta));
+                if target.to_string_lossy() != meta.cwd {
+                    engine.config.paths.insert(
+                        meta.project_key.clone(),
+                        target.to_string_lossy().to_string(),
+                    );
+                    engine.config.save().map_err(err)?;
+                }
+            }
+        }
+
         Ok(RestoreView {
             imported: outcome.imported,
             native_id: outcome.native_id,
@@ -419,11 +481,37 @@ async fn restore_session(
 }
 
 #[tauri::command]
+async fn add_repository(path: String) -> Result<ConfigView, String> {
+    blocking(move || {
+        let mut config = load_config()?;
+        let path = expand_tilde(&path);
+        if !path.exists() {
+            return Err(format!("path does not exist: {}", path.display()));
+        }
+        let (key, _, _) = project_identity(&path);
+        config.paths.insert(key, path.to_string_lossy().to_string());
+        config.save().map_err(err)?;
+        Ok(ConfigView::from_config(&config))
+    })
+    .await
+}
+
+#[tauri::command]
+async fn remove_repository(key: String) -> Result<ConfigView, String> {
+    blocking(move || {
+        let mut config = load_config()?;
+        config.paths.remove(&key);
+        config.save().map_err(err)?;
+        Ok(ConfigView::from_config(&config))
+    })
+    .await
+}
+
+#[tauri::command]
 async fn save_settings(
     save_mode: String,
     agents: AgentSettings,
     wsl: Vec<WslSourceView>,
-    paths: Vec<PathMappingView>,
 ) -> Result<ConfigView, String> {
     blocking(move || {
         let mut config = load_config()?;
@@ -438,18 +526,6 @@ async fn save_settings(
                 codex_home: non_empty(source.codex_home),
                 claude_home: non_empty(source.claude_home),
                 unc_root: None,
-            })
-            .collect();
-        config.paths = paths
-            .into_iter()
-            .filter(|mapping| !mapping.key.trim().is_empty())
-            .filter_map(|mapping| {
-                let path = mapping.path.trim().to_string();
-                if path.is_empty() {
-                    None
-                } else {
-                    Some((mapping.key.trim().to_string(), path))
-                }
             })
             .collect();
         config.save().map_err(err)?;
@@ -526,14 +602,18 @@ async fn run_doctor() -> Result<DoctorView, String> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             get_config,
             init_store,
+            update_store,
             list_sessions,
             sync_status,
             push_store,
             pull_store,
             restore_session,
+            add_repository,
+            remove_repository,
             save_settings,
             run_doctor
         ])

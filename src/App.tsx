@@ -17,21 +17,26 @@ import {
   WifiOff,
 } from "lucide-react";
 import {
+  addRepository,
   getConfig,
   initStore,
   isDesktop,
   listSessions,
   pullStore,
   pushStore,
+  removeRepository,
   restoreSession,
   runDoctor,
   saveSettings,
   syncStatus,
+  updateStore,
 } from "./api";
+import { open } from "@tauri-apps/plugin-dialog";
+import { t } from "./i18n";
 import type {
   Agent,
   ConfigView,
-  PathMappingView,
+  RepositoryView,
   SessionView,
   StatusView,
   WslSourceView,
@@ -529,6 +534,7 @@ function Workspace({
                     (session) => session.familyId === selected.familyId,
                   )}
                   onSelect={setSelectedKey}
+                  onRestored={() => void refresh(false)}
                   onToast={setToast}
                 />
               ) : (
@@ -557,14 +563,16 @@ function SessionDetail({
   session,
   timelines,
   onSelect,
+  onRestored,
   onToast,
 }: {
   session: SessionView;
   timelines: SessionView[];
   onSelect: (key: string) => void;
+  onRestored: () => void;
   onToast: (toast: { kind: "ok" | "error"; text: string }) => void;
 }) {
-  const [restoreCwd, setRestoreCwd] = useState(session.cwd);
+  const [restoreCwd, setRestoreCwd] = useState(session.mappedCwd || session.cwd);
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<{
     path: string;
@@ -575,11 +583,22 @@ function SessionDetail({
   async function restore() {
     setBusy(true);
     try {
+      let target = restoreCwd.trim() || null;
+      if (!session.cwdExists && !session.mappedCwd && !target) {
+        const picked = await pickDirectory(session.cwd);
+        if (!picked) {
+          setBusy(false);
+          return;
+        }
+        target = picked;
+        setRestoreCwd(picked);
+      }
       const outcome = await restoreSession(
         session.id,
         session.timelineId,
         session.agent,
-        restoreCwd.trim() || null,
+        target,
+        true,
       );
       setResult({
         path: outcome.path,
@@ -588,8 +607,13 @@ function SessionDetail({
       });
       onToast({
         kind: "ok",
-        text: outcome.imported ? "会话已恢复" : "会话已是最新",
+        text: outcome.imported
+          ? target
+            ? "会话已恢复，路径映射已记住"
+            : "会话已恢复"
+          : "会话已是最新",
       });
+      onRestored();
     } catch (err) {
       onToast({ kind: "error", text: String(err) });
     } finally {
@@ -694,9 +718,18 @@ function SessionDetail({
             placeholder={session.cwd}
           />
         </label>
+        {!session.cwdExists && !session.mappedCwd && (
+          <p className="muted restore-hint">
+            原路径在本机不存在。点击恢复会让你选择本地项目目录，选完会自动记住映射。
+          </p>
+        )}
         <button className="button primary wide" onClick={() => void restore()} disabled={busy}>
           {busy ? <Loader2 className="spin" size={15} /> : <FolderGit2 size={15} />}
-          {busy ? "正在恢复…" : "恢复会话"}
+          {busy
+            ? "正在恢复…"
+            : !session.cwdExists && !session.mappedCwd
+              ? "选择目录并恢复"
+              : "恢复会话"}
         </button>
 
         {result && (
@@ -746,8 +779,14 @@ function SettingsPanel({
   const [saveMode, setSaveMode] = useState(config.saveMode);
   const [agents, setAgents] = useState(config.agents);
   const [wsl, setWsl] = useState<WslSourceView[]>(config.wsl);
-  const [paths, setPaths] = useState<PathMappingView[]>(config.paths);
+  const [repositories, setRepositories] = useState<RepositoryView[]>(
+    config.repositories,
+  );
   const [busy, setBusy] = useState(false);
+  const [editingStore, setEditingStore] = useState(false);
+  const [storePath, setStorePath] = useState(config.storePath);
+  const [remote, setRemote] = useState(config.remote || "");
+  const [machineName, setMachineName] = useState(config.machineName);
 
   function updateWsl(index: number, patch: Partial<WslSourceView>) {
     setWsl((current) =>
@@ -755,18 +794,36 @@ function SettingsPanel({
     );
   }
 
-  function updatePath(index: number, patch: Partial<PathMappingView>) {
-    setPaths((current) =>
-      current.map((item, i) => (i === index ? { ...item, ...patch } : item)),
-    );
+  async function addProject() {
+    const picked = await pickDirectory();
+    if (!picked) return;
+    try {
+      const next = await addRepository(picked);
+      setRepositories(next.repositories);
+      onConfigChange(next);
+      onToast({ kind: "ok", text: t("settings.repositoryAdded") });
+    } catch (err) {
+      onToast({ kind: "error", text: String(err) });
+    }
+  }
+
+  async function removeProject(key: string) {
+    try {
+      const next = await removeRepository(key);
+      setRepositories(next.repositories);
+      onConfigChange(next);
+      onToast({ kind: "ok", text: t("settings.repositoryRemoved") });
+    } catch (err) {
+      onToast({ kind: "error", text: String(err) });
+    }
   }
 
   async function save() {
     setBusy(true);
     try {
-      const next = await saveSettings(saveMode, agents, wsl, paths);
+      const next = await saveSettings(saveMode, agents, wsl);
       onConfigChange(next);
-      onToast({ kind: "ok", text: "设置已保存" });
+      onToast({ kind: "ok", text: t("settings.saved") });
     } catch (err) {
       onToast({ kind: "error", text: String(err) });
     } finally {
@@ -774,37 +831,128 @@ function SettingsPanel({
     }
   }
 
+  function startEditStore() {
+    setStorePath(config.storePath);
+    setRemote(config.remote || "");
+    setMachineName(config.machineName);
+    setEditingStore(true);
+  }
+
+  async function saveStore() {
+    setBusy(true);
+    try {
+      const next = await updateStore(
+        storePath.trim(),
+        remote.trim() || null,
+        machineName.trim() || null,
+      );
+      onConfigChange(next);
+      setEditingStore(false);
+      onToast({ kind: "ok", text: t("settings.storeUpdated") });
+    } catch (err) {
+      onToast({ kind: "error", text: String(err) });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const modeCopy = {
+    index: {
+      label: t("settings.modeIndex"),
+      hint: t("settings.modeIndexHint"),
+    },
+    standard: {
+      label: t("settings.modeStandard"),
+      hint: t("settings.modeStandardHint"),
+    },
+    full: {
+      label: t("settings.modeFull"),
+      hint: t("settings.modeFullHint"),
+    },
+  };
+
   return (
     <div className="settings">
       <div className="pane-header">
         <div>
-          <h2>设置</h2>
-          <p className="muted">保存模式、工具来源和 WSL 配置</p>
+          <h2>{t("settings.title")}</h2>
+          <p className="muted">{t("settings.subtitle")}</p>
         </div>
         <button className="button primary" onClick={() => void save()} disabled={busy}>
           {busy ? <Loader2 className="spin" size={15} /> : <Check size={15} />}
-          保存
+          {t("settings.save")}
         </button>
       </div>
 
       <section className="settings-card">
-        <h3>仓库</h3>
-        <div className="kv">
-          <span>本地目录</span>
-          <code>{config.storePath}</code>
+        <div className="settings-head">
+          <h3>{t("settings.repo")}</h3>
+          {!editingStore && (
+            <button className="button ghost" onClick={startEditStore}>
+              {t("settings.changeRepo")}
+            </button>
+          )}
         </div>
-        <div className="kv">
-          <span>远程</span>
-          <code>{config.remote || "未配置"}</code>
-        </div>
-        <div className="kv">
-          <span>机器</span>
-          <code>{config.machineName}</code>
-        </div>
+
+        {editingStore ? (
+          <div className="store-editor">
+            <label className="stack-tight">
+              <span>{t("settings.localDir")}</span>
+              <input
+                value={storePath}
+                onChange={(e) => setStorePath(e.target.value)}
+                placeholder="~/Cairn"
+              />
+            </label>
+            <label className="stack-tight">
+              <span>{t("settings.remote")}</span>
+              <input
+                value={remote}
+                onChange={(e) => setRemote(e.target.value)}
+                placeholder="git@github.com:you/cairn-store.git"
+              />
+            </label>
+            <label className="stack-tight">
+              <span>{t("settings.machine")}</span>
+              <input
+                value={machineName}
+                onChange={(e) => setMachineName(e.target.value)}
+              />
+            </label>
+            <div className="editor-actions">
+              <button className="button primary" onClick={() => void saveStore()} disabled={busy}>
+                {busy ? <Loader2 className="spin" size={15} /> : <Check size={15} />}
+                {t("settings.saveChanges")}
+              </button>
+              <button
+                className="button ghost"
+                onClick={() => setEditingStore(false)}
+                disabled={busy}
+              >
+                {t("settings.cancel")}
+              </button>
+            </div>
+          </div>
+        ) : (
+          <>
+            <div className="kv">
+              <span>{t("settings.localDir")}</span>
+              <code>{config.storePath}</code>
+            </div>
+            <div className="kv">
+              <span>{t("settings.remote")}</span>
+              <code>{config.remote || t("settings.unconfigured")}</code>
+            </div>
+            <div className="kv">
+              <span>{t("settings.machine")}</span>
+              <code>{config.machineName}</code>
+            </div>
+          </>
+        )}
       </section>
 
       <section className="settings-card">
-        <h3>保存模式</h3>
+        <h3>{t("settings.saveMode")}</h3>
         <div className="segmented">
           {(["index", "standard", "full"] as const).map((mode) => (
             <button
@@ -812,28 +960,22 @@ function SettingsPanel({
               className={saveMode === mode ? "active" : ""}
               onClick={() => setSaveMode(mode)}
             >
-              <strong>{mode}</strong>
-              <span>
-                {mode === "index"
-                  ? "只存索引，不能恢复"
-                  : mode === "standard"
-                    ? "可恢复，裁剪大块"
-                    : "完整原样"}
-              </span>
+              <strong>{modeCopy[mode].label}</strong>
+              <span>{modeCopy[mode].hint}</span>
             </button>
           ))}
         </div>
       </section>
 
       <section className="settings-card">
-        <h3>工具</h3>
+        <h3>{t("settings.tools")}</h3>
         <label className="toggle">
           <input
             type="checkbox"
             checked={agents.codex}
             onChange={(e) => setAgents({ ...agents, codex: e.target.checked })}
           />
-          <span>Codex</span>
+          <span>{t("settings.codex")}</span>
         </label>
         <label className="toggle">
           <input
@@ -841,48 +983,46 @@ function SettingsPanel({
             checked={agents.claude}
             onChange={(e) => setAgents({ ...agents, claude: e.target.checked })}
           />
-          <span>Claude Code</span>
+          <span>{t("settings.claude")}</span>
         </label>
       </section>
 
       <section className="settings-card">
         <div className="settings-head">
           <div>
-            <h3>WSL 来源</h3>
-            <p className="muted">
-              文件级支持：通过 UNC 路径读写，不写 WSL 里的 SQLite。
-            </p>
+            <h3>{t("settings.wsl")}</h3>
+            <p className="muted">{t("settings.wslHint")}</p>
           </div>
           <button
             className="button ghost"
             onClick={() => setWsl([...wsl, { distro: "", codexHome: "", claudeHome: "" }])}
           >
-            + 添加
+            + {t("settings.add")}
           </button>
         </div>
 
-        {wsl.length === 0 && <p className="muted">还没有配置 WSL 发行版。</p>}
+        {wsl.length === 0 && <p className="muted">{t("settings.wslEmpty")}</p>}
         {wsl.map((source, index) => (
           <div className="wsl-row" key={index}>
             <input
               value={source.distro}
               onChange={(e) => updateWsl(index, { distro: e.target.value })}
-              placeholder="Ubuntu"
+              placeholder={t("settings.distro")}
             />
             <input
               value={source.codexHome || ""}
               onChange={(e) => updateWsl(index, { codexHome: e.target.value })}
-              placeholder="/home/you/.codex"
+              placeholder={t("settings.wslCodexPlaceholder")}
             />
             <input
               value={source.claudeHome || ""}
               onChange={(e) => updateWsl(index, { claudeHome: e.target.value })}
-              placeholder="/home/you/.claude"
+              placeholder={t("settings.wslClaudePlaceholder")}
             />
             <button
               className="icon-button danger"
               onClick={() => setWsl(wsl.filter((_, i) => i !== index))}
-              title="删除"
+              title={t("settings.remove")}
             >
               ×
             </button>
@@ -893,36 +1033,29 @@ function SettingsPanel({
       <section className="settings-card">
         <div className="settings-head">
           <div>
-            <h3>路径映射</h3>
-            <p className="muted">
-              把其他机器的项目路径映射到本机。键可以是 project key 或 git remote。
-            </p>
+            <h3>{t("settings.repositories")}</h3>
+            <p className="muted">{t("settings.repositoriesHint")}</p>
           </div>
-          <button
-            className="button ghost"
-            onClick={() => setPaths([...paths, { key: "", path: "" }])}
-          >
-            + 添加
+          <button className="button ghost" onClick={() => void addProject()}>
+            + {t("settings.addRepository")}
           </button>
         </div>
 
-        {paths.length === 0 && <p className="muted">还没有路径映射。</p>}
-        {paths.map((mapping, index) => (
-          <div className="mapping-row" key={index}>
-            <input
-              value={mapping.key}
-              onChange={(e) => updatePath(index, { key: e.target.value })}
-              placeholder="git:github.com/you/repo"
-            />
-            <input
-              value={mapping.path}
-              onChange={(e) => updatePath(index, { path: e.target.value })}
-              placeholder="~/code/repo"
-            />
+        {repositories.length === 0 && (
+          <p className="muted">{t("settings.repositoriesEmpty")}</p>
+        )}
+        {repositories.map((repository) => (
+          <div className="repo-row" key={repository.key}>
+            <div className="repo-main">
+              <strong>
+                {repository.remote || prettyProject(repository.key)}
+              </strong>
+              <code>{repository.path}</code>
+            </div>
             <button
               className="icon-button danger"
-              onClick={() => setPaths(paths.filter((_, i) => i !== index))}
-              title="删除"
+              onClick={() => void removeProject(repository.key)}
+              title={t("settings.remove")}
             >
               ×
             </button>
@@ -972,6 +1105,20 @@ function DoctorPanel() {
       </section>
     </div>
   );
+}
+
+async function pickDirectory(defaultPath?: string | null): Promise<string | null> {
+  if (isDesktop()) {
+    const selected = await open({
+      directory: true,
+      multiple: false,
+      defaultPath: defaultPath || undefined,
+    });
+    if (Array.isArray(selected)) return selected[0] ?? null;
+    return selected ?? null;
+  }
+  const picked = window.prompt("选择本地项目目录", defaultPath || "");
+  return picked && picked.trim() ? picked.trim() : null;
 }
 
 function formatTime(ts: number): string {

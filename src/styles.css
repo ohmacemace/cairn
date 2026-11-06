@@ -761,6 +761,12 @@ input:focus {
   gap: 6px;
 }
 
+.restore-hint {
+  margin: -4px 0 0;
+  font-size: 11px;
+  line-height: 1.55;
+}
+
 .restore-result {
   display: grid;
   gap: 8px;
@@ -1019,6 +1025,59 @@ input:focus {
 .mapping-row input {
   padding: 8px 9px;
   font-size: 11.5px;
+}
+
+.mapping-row code {
+  background: var(--panel-3);
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  padding: 8px 9px;
+  font-size: 11px;
+  color: #b9c5d6;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.store-editor {
+  display: grid;
+  gap: 10px;
+}
+
+.editor-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.repo-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  border: 1px solid var(--border-soft);
+  border-radius: 10px;
+  padding: 9px 10px;
+}
+
+.repo-main {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.repo-main strong {
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.repo-main code {
+  font-size: 10.5px;
+  color: var(--muted-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .doctor {

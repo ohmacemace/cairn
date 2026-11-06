@@ -12,8 +12,9 @@ export interface WslSourceView {
   claudeHome?: string | null;
 }
 
-export interface PathMappingView {
+export interface RepositoryView {
   key: string;
+  remote?: string | null;
   path: string;
 }
 
@@ -24,7 +25,7 @@ export interface ConfigView {
   saveMode: SaveMode;
   agents: AgentSettings;
   wsl: WslSourceView[];
-  paths: PathMappingView[];
+  repositories: RepositoryView[];
 }
 
 export interface SessionView {
@@ -43,6 +44,8 @@ export interface SessionView {
   machineName: string;
   local: boolean;
   remote: boolean;
+  cwdExists: boolean;
+  mappedCwd?: string | null;
 }
 
 export interface ScanResult {

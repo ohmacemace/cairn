@@ -3,9 +3,9 @@ import type {
   Agent,
   ConfigView,
   DoctorResult,
-  PathMappingView,
   PullResult,
   PushResult,
+  RepositoryView,
   RestoreResult,
   ScanResult,
   SessionView,
@@ -25,7 +25,13 @@ let mockConfig: ConfigView | null = {
   saveMode: "standard",
   agents: { codex: true, claude: true },
   wsl: [{ distro: "Ubuntu", codexHome: "/home/you/.codex", claudeHome: "/home/you/.claude" }],
-  paths: [{ key: "git:github.com/acme/payments", path: "~/code/payments" }],
+  repositories: [
+    {
+      key: "git:github.com/acme/payments",
+      remote: "github.com/acme/payments",
+      path: "~/code/payments",
+    },
+  ],
 };
 
 let mockSessions: SessionView[] = [
@@ -45,6 +51,8 @@ let mockSessions: SessionView[] = [
     machineName: "macbook",
     local: true,
     remote: true,
+    cwdExists: true,
+    mappedCwd: null,
   },
   {
     id: "01a1b1a0-2239-7012-829e-fc4ff70993b7",
@@ -62,6 +70,8 @@ let mockSessions: SessionView[] = [
     machineName: "windows-box",
     local: false,
     remote: true,
+    cwdExists: false,
+    mappedCwd: null,
   },
   {
     id: "cf4f3229-7204-4bd9-ae29-a9d9d89ee421",
@@ -79,6 +89,8 @@ let mockSessions: SessionView[] = [
     machineName: "linux-desktop",
     local: true,
     remote: true,
+    cwdExists: true,
+    mappedCwd: null,
   },
   {
     id: "44444444-4444-4444-8444-444444444444",
@@ -96,6 +108,8 @@ let mockSessions: SessionView[] = [
     machineName: "windows-box (WSL: Ubuntu)",
     local: true,
     remote: false,
+    cwdExists: true,
+    mappedCwd: null,
   },
 ];
 
@@ -117,7 +131,7 @@ export async function initStore(
       saveMode: "standard",
       agents: { codex: true, claude: true },
       wsl: [],
-      paths: [],
+      repositories: [],
     };
     return mockConfig;
   }
@@ -174,10 +188,11 @@ export async function restoreSession(
   timelineId: string,
   agent: Agent,
   cwd: string | null,
+  remember: boolean,
 ): Promise<RestoreResult> {
   if (!isTauri) {
     const session = mockSessions.find((item) => item.timelineId === timelineId);
-    const target = cwd || session?.cwd || "~";
+    const target = cwd || session?.mappedCwd || session?.cwd || "~";
     return {
       imported: true,
       nativeId: id,
@@ -189,20 +204,69 @@ export async function restoreSession(
           : `claude --resume ${id}`,
     };
   }
-  return invoke<RestoreResult>("restore_session", { id, timelineId, agent, cwd });
+  return invoke<RestoreResult>("restore_session", {
+    id,
+    timelineId,
+    agent,
+    cwd,
+    remember,
+  });
+}
+
+export async function addRepository(path: string): Promise<ConfigView> {
+  if (!isTauri && mockConfig) {
+    const repository: RepositoryView = {
+      key: `local:${path}`,
+      remote: null,
+      path,
+    };
+    mockConfig = {
+      ...mockConfig,
+      repositories: [...mockConfig.repositories, repository],
+    };
+    return mockConfig;
+  }
+  return invoke<ConfigView>("add_repository", { path });
+}
+
+export async function removeRepository(key: string): Promise<ConfigView> {
+  if (!isTauri && mockConfig) {
+    mockConfig = {
+      ...mockConfig,
+      repositories: mockConfig.repositories.filter((repo) => repo.key !== key),
+    };
+    return mockConfig;
+  }
+  return invoke<ConfigView>("remove_repository", { key });
+}
+
+export async function updateStore(
+  storePath: string,
+  remote: string | null,
+  machineName: string | null,
+): Promise<ConfigView> {
+  if (!isTauri && mockConfig) {
+    mockConfig = {
+      ...mockConfig,
+      storePath,
+      remote,
+      machineName: machineName?.trim() || mockConfig.machineName,
+    };
+    return mockConfig;
+  }
+  return invoke<ConfigView>("update_store", { storePath, remote, machineName });
 }
 
 export async function saveSettings(
   saveMode: ConfigView["saveMode"],
   agents: ConfigView["agents"],
   wsl: WslSourceView[],
-  paths: PathMappingView[],
 ): Promise<ConfigView> {
   if (!isTauri && mockConfig) {
-    mockConfig = { ...mockConfig, saveMode, agents, wsl, paths };
+    mockConfig = { ...mockConfig, saveMode, agents, wsl };
     return mockConfig;
   }
-  return invoke<ConfigView>("save_settings", { saveMode, agents, wsl, paths });
+  return invoke<ConfigView>("save_settings", { saveMode, agents, wsl });
 }
 
 export async function runDoctor(): Promise<DoctorResult> {
