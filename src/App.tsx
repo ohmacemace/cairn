@@ -20,17 +20,18 @@ import {
   getConfig,
   initStore,
   isDesktop,
+  listSessions,
   pullStore,
   pushStore,
   restoreSession,
   runDoctor,
   saveSettings,
-  scanSessions,
   syncStatus,
 } from "./api";
 import type {
   Agent,
   ConfigView,
+  PathMappingView,
   SessionView,
   StatusView,
   WslSourceView,
@@ -182,7 +183,8 @@ function Workspace({
   const [sessions, setSessions] = useState<SessionView[]>([]);
   const [warnings, setWarnings] = useState<string[]>([]);
   const [status, setStatus] = useState<StatusView | null>(null);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [selectedKey, setSelectedKey] = useState<string | null>(null);
+  const [search, setSearch] = useState("");
   const [view, setView] = useState<View>("sessions");
   const [agentFilter, setAgentFilter] = useState<AgentFilter>("all");
   const [projectFilter, setProjectFilter] = useState("all");
@@ -195,11 +197,17 @@ function Workspace({
   const refresh = async (showSpinner = true) => {
     if (showSpinner) setBusy("refresh");
     try {
-      const [scan, nextStatus] = await Promise.all([scanSessions(), syncStatus()]);
+      const [scan, nextStatus] = await Promise.all([listSessions(), syncStatus()]);
       setSessions(scan.sessions);
       setWarnings([...scan.warnings, ...nextStatus.warnings]);
       setStatus(nextStatus);
-      setSelectedId((current) => current ?? scan.sessions[0]?.id ?? null);
+      setSelectedKey(
+        (current) =>
+          current ??
+          (scan.sessions[0]
+            ? `${scan.sessions[0].agent}-${scan.sessions[0].timelineId}`
+            : null),
+      );
     } catch (err) {
       setToast({ kind: "error", text: String(err) });
     } finally {
@@ -226,15 +234,24 @@ function Workspace({
   }, [sessions]);
 
   const filtered = useMemo(() => {
+    const query = search.trim().toLowerCase();
     return sessions.filter((session) => {
       if (agentFilter !== "all" && session.agent !== agentFilter) return false;
       if (projectFilter !== "all" && session.project !== projectFilter) return false;
       if (wslOnly && !session.wslDistro) return false;
+      if (query) {
+        const haystack =
+          `${session.title} ${session.project} ${session.cwd} ${session.id}`.toLowerCase();
+        if (!haystack.includes(query)) return false;
+      }
       return true;
     });
-  }, [sessions, agentFilter, projectFilter, wslOnly]);
+  }, [sessions, agentFilter, projectFilter, wslOnly, search]);
 
-  const selected = sessions.find((session) => session.id === selectedId) ?? null;
+  const selected =
+    sessions.find(
+      (session) => `${session.agent}-${session.timelineId}` === selectedKey,
+    ) ?? null;
 
   async function sync(kind: "push" | "pull") {
     setBusy(kind);
@@ -451,8 +468,13 @@ function Workspace({
                     {wslOnly && " · WSL"}
                   </p>
                 </div>
+                <input
+                  className="search"
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  placeholder="搜索标题、项目、路径…"
+                />
               </div>
-
               {warnings.length > 0 && (
                 <div className="alert warn">
                   <AlertTriangle size={15} />
@@ -461,26 +483,33 @@ function Workspace({
               )}
 
               <div className="session-list">
-                {filtered.map((session) => (
-                  <button
-                    key={`${session.agent}-${session.id}`}
-                    className={`session-card ${selectedId === session.id ? "selected" : ""}`}
-                    onClick={() => setSelectedId(session.id)}
-                  >
-                    <div className="session-row">
-                      <span className={`agent-dot ${session.agent}`} />
-                      <strong>{session.title}</strong>
-                      {session.wslDistro && (
-                        <span className="badge wsl">WSL</span>
-                      )}
-                    </div>
-                    <div className="session-sub">
-                      <span>{prettyProject(session.project)}</span>
-                      <span>{formatTime(session.updatedAt)}</span>
-                      <span>{formatBytes(session.sizeBytes)}</span>
-                    </div>
-                  </button>
-                ))}
+                {filtered.map((session) => {
+                  const key = `${session.agent}-${session.timelineId}`;
+                  return (
+                    <button
+                      key={key}
+                      className={`session-card ${selectedKey === key ? "selected" : ""}`}
+                      onClick={() => setSelectedKey(key)}
+                    >
+                      <div className="session-row">
+                        <span className={`agent-dot ${session.agent}`} />
+                        <strong>{session.title}</strong>
+                        {session.parentTimeline && (
+                          <span className="badge fork">分叉</span>
+                        )}
+                        {!session.local && <span className="badge remote">云端</span>}
+                        {session.wslDistro && (
+                          <span className="badge wsl">WSL</span>
+                        )}
+                      </div>
+                      <div className="session-sub">
+                        <span>{prettyProject(session.project)}</span>
+                        <span>{formatTime(session.updatedAt)}</span>
+                        <span>{formatBytes(session.sizeBytes)}</span>
+                      </div>
+                    </button>
+                  );
+                })}
                 {filtered.length === 0 && (
                   <div className="empty">
                     <Mountain size={28} />
@@ -494,8 +523,12 @@ function Workspace({
             <aside className="detail-pane">
               {selected ? (
                 <SessionDetail
-                  key={`${selected.agent}-${selected.id}`}
+                  key={`${selected.agent}-${selected.timelineId}`}
                   session={selected}
+                  timelines={sessions.filter(
+                    (session) => session.familyId === selected.familyId,
+                  )}
+                  onSelect={setSelectedKey}
                   onToast={setToast}
                 />
               ) : (
@@ -522,9 +555,13 @@ function Workspace({
 
 function SessionDetail({
   session,
+  timelines,
+  onSelect,
   onToast,
 }: {
   session: SessionView;
+  timelines: SessionView[];
+  onSelect: (key: string) => void;
   onToast: (toast: { kind: "ok" | "error"; text: string }) => void;
 }) {
   const [restoreCwd, setRestoreCwd] = useState(session.cwd);
@@ -540,6 +577,7 @@ function SessionDetail({
     try {
       const outcome = await restoreSession(
         session.id,
+        session.timelineId,
         session.agent,
         restoreCwd.trim() || null,
       );
@@ -575,9 +613,49 @@ function SessionDetail({
           {session.agent === "codex" ? "Codex" : "Claude Code"}
         </span>
         {session.wslDistro && <span className="badge wsl">WSL · {session.wslDistro}</span>}
+        {session.parentTimeline && <span className="badge fork">分叉</span>}
+        {session.local ? (
+          <span className="badge local">本机</span>
+        ) : (
+          <span className="badge remote">仅在云端</span>
+        )}
         <h2>{session.title}</h2>
         <p className="muted mono">{session.id}</p>
       </div>
+
+      {timelines.length > 1 && (
+        <div className="timeline-box">
+          <div className="restore-title">
+            <h3>时间线</h3>
+            <span className="muted">{timelines.length} 条</span>
+          </div>
+          {timelines
+            .slice()
+            .sort((a, b) => b.updatedAt - a.updatedAt)
+            .map((timeline) => {
+              const key = `${timeline.agent}-${timeline.timelineId}`;
+              const active = timeline.timelineId === session.timelineId;
+              return (
+                <button
+                  key={key}
+                  className={`timeline-item ${active ? "active" : ""}`}
+                  onClick={() => onSelect(key)}
+                >
+                  <span className="timeline-name">
+                    {timeline.timelineId === timeline.familyId ? "主线" : "分叉"}
+                  </span>
+                  <span className="timeline-meta">
+                    {timeline.machineName} · {formatTime(timeline.updatedAt)}
+                  </span>
+                  <span className="timeline-flags">
+                    {timeline.local ? "本机" : "云端"}
+                    {timeline.remote ? " · 已同步" : ""}
+                  </span>
+                </button>
+              );
+            })}
+        </div>
+      )}
 
       <div className="meta-grid">
         <div>
@@ -642,6 +720,12 @@ function SessionDetail({
         Cairn 不会自动启动 agent。恢复后打开 Codex / Claude Code，在对应入口继续这条会话。
       </div>
 
+      {session.parentTimeline && (
+        <div className="note warn-note">
+          这是从主线分叉出的时间线。恢复时会先备份同名本地会话，再写入当前时间线。
+        </div>
+      )}
+
       <div className="detail-footer">
         <span className="muted">来源</span>
         <span>{session.source || "unknown"}</span>
@@ -662,6 +746,7 @@ function SettingsPanel({
   const [saveMode, setSaveMode] = useState(config.saveMode);
   const [agents, setAgents] = useState(config.agents);
   const [wsl, setWsl] = useState<WslSourceView[]>(config.wsl);
+  const [paths, setPaths] = useState<PathMappingView[]>(config.paths);
   const [busy, setBusy] = useState(false);
 
   function updateWsl(index: number, patch: Partial<WslSourceView>) {
@@ -670,10 +755,16 @@ function SettingsPanel({
     );
   }
 
+  function updatePath(index: number, patch: Partial<PathMappingView>) {
+    setPaths((current) =>
+      current.map((item, i) => (i === index ? { ...item, ...patch } : item)),
+    );
+  }
+
   async function save() {
     setBusy(true);
     try {
-      const next = await saveSettings(saveMode, agents, wsl);
+      const next = await saveSettings(saveMode, agents, wsl, paths);
       onConfigChange(next);
       onToast({ kind: "ok", text: "设置已保存" });
     } catch (err) {
@@ -791,6 +882,46 @@ function SettingsPanel({
             <button
               className="icon-button danger"
               onClick={() => setWsl(wsl.filter((_, i) => i !== index))}
+              title="删除"
+            >
+              ×
+            </button>
+          </div>
+        ))}
+      </section>
+
+      <section className="settings-card">
+        <div className="settings-head">
+          <div>
+            <h3>路径映射</h3>
+            <p className="muted">
+              把其他机器的项目路径映射到本机。键可以是 project key 或 git remote。
+            </p>
+          </div>
+          <button
+            className="button ghost"
+            onClick={() => setPaths([...paths, { key: "", path: "" }])}
+          >
+            + 添加
+          </button>
+        </div>
+
+        {paths.length === 0 && <p className="muted">还没有路径映射。</p>}
+        {paths.map((mapping, index) => (
+          <div className="mapping-row" key={index}>
+            <input
+              value={mapping.key}
+              onChange={(e) => updatePath(index, { key: e.target.value })}
+              placeholder="git:github.com/you/repo"
+            />
+            <input
+              value={mapping.path}
+              onChange={(e) => updatePath(index, { path: e.target.value })}
+              placeholder="~/code/repo"
+            />
+            <button
+              className="icon-button danger"
+              onClick={() => setPaths(paths.filter((_, i) => i !== index))}
               title="删除"
             >
               ×

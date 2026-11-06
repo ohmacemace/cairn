@@ -18,6 +18,13 @@ pub struct ScanReport {
     pub warnings: Vec<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct SessionListing {
+    pub meta: SessionMeta,
+    pub local: bool,
+    pub remote: bool,
+}
+
 #[derive(Debug, Default)]
 pub struct PushReport {
     pub added: usize,
@@ -123,6 +130,46 @@ impl SyncEngine {
             .records
             .sort_by_key(|a| std::cmp::Reverse(a.meta.updated_at));
         Ok(report)
+    }
+
+    /// Merge locally discovered sessions with store bundles.
+    /// Local metadata wins when a timeline exists in both places.
+    pub fn list_all(&self) -> Result<(Vec<SessionListing>, Vec<String>)> {
+        let scan = self.scan()?;
+        let warnings = scan.warnings;
+        let store = self.store.list_bundles()?;
+
+        let mut by_key: BTreeMap<(Agent, String), SessionListing> = BTreeMap::new();
+        for record in scan.records {
+            by_key.insert(
+                (record.meta.agent, record.meta.timeline_id.clone()),
+                SessionListing {
+                    meta: record.meta,
+                    local: true,
+                    remote: false,
+                },
+            );
+        }
+        for meta in store {
+            let key = (meta.agent, meta.timeline_id.clone());
+            match by_key.get_mut(&key) {
+                Some(entry) => entry.remote = true,
+                None => {
+                    by_key.insert(
+                        key,
+                        SessionListing {
+                            meta,
+                            local: false,
+                            remote: true,
+                        },
+                    );
+                }
+            }
+        }
+
+        let mut entries: Vec<_> = by_key.into_values().collect();
+        entries.sort_by_key(|entry| std::cmp::Reverse(entry.meta.updated_at));
+        Ok((entries, warnings))
     }
 
     pub fn push(&self, dry_run: bool) -> Result<PushReport> {
@@ -408,7 +455,17 @@ impl SyncEngine {
         }
         .ok_or_else(|| Error::NotFound(format!("session {id}")))?;
 
-        let record = self.store.read_bundle(meta.agent, &meta.timeline_id)?;
+        self.restore_timeline(meta.agent, &meta.timeline_id, cwd, dry_run)
+    }
+
+    pub fn restore_timeline(
+        &self,
+        agent: Agent,
+        timeline_id: &str,
+        cwd: Option<&Path>,
+        dry_run: bool,
+    ) -> Result<ImportOutcome> {
+        let record = self.store.read_bundle(agent, timeline_id)?;
         let target_cwd = match cwd {
             Some(path) => path.to_path_buf(),
             None => self.config.resolve_cwd(&record.meta),
@@ -423,7 +480,7 @@ impl SyncEngine {
             });
         }
 
-        if !record.meta.wsl_distro.is_some() && !target_cwd.exists() {
+        if record.meta.wsl_distro.is_none() && !target_cwd.exists() {
             std::fs::create_dir_all(&target_cwd)?;
         }
 

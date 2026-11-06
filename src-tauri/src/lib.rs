@@ -25,6 +25,13 @@ struct WslSourceView {
     claude_home: Option<String>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PathMappingView {
+    key: String,
+    path: String,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ConfigView {
@@ -34,6 +41,7 @@ struct ConfigView {
     save_mode: String,
     agents: AgentSettings,
     wsl: Vec<WslSourceView>,
+    paths: Vec<PathMappingView>,
 }
 
 impl ConfigView {
@@ -60,6 +68,14 @@ impl ConfigView {
                     claude_home: source.claude_home.clone(),
                 })
                 .collect(),
+            paths: config
+                .paths
+                .iter()
+                .map(|(key, path)| PathMappingView {
+                    key: key.clone(),
+                    path: path.clone(),
+                })
+                .collect(),
         }
     }
 }
@@ -68,6 +84,9 @@ impl ConfigView {
 #[serde(rename_all = "camelCase")]
 struct SessionView {
     id: String,
+    timeline_id: String,
+    family_id: String,
+    parent_timeline: Option<String>,
     agent: String,
     title: String,
     project: String,
@@ -77,6 +96,8 @@ struct SessionView {
     source: Option<String>,
     wsl_distro: Option<String>,
     machine_name: String,
+    local: bool,
+    remote: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -141,9 +162,12 @@ fn load_config() -> Result<Config, String> {
     Config::load().map_err(err)
 }
 
-fn session_view(meta: &SessionMeta) -> SessionView {
+fn session_view(meta: &SessionMeta, local: bool, remote: bool) -> SessionView {
     SessionView {
         id: meta.native_id.clone(),
+        timeline_id: meta.timeline_id.clone(),
+        family_id: meta.family_id.clone(),
+        parent_timeline: meta.parent_timeline.clone(),
         agent: meta.agent.to_string(),
         title: meta.title.clone(),
         project: meta.project_key.clone(),
@@ -153,6 +177,8 @@ fn session_view(meta: &SessionMeta) -> SessionView {
         source: meta.source.clone(),
         wsl_distro: meta.wsl_distro.clone(),
         machine_name: meta.machine_name.clone(),
+        local,
+        remote,
     }
 }
 
@@ -268,18 +294,17 @@ async fn init_store(
 }
 
 #[tauri::command]
-async fn scan_sessions() -> Result<ScanView, String> {
+async fn list_sessions() -> Result<ScanView, String> {
     blocking(|| {
         let config = load_config()?;
         let engine = SyncEngine::new(config).map_err(err)?;
-        let report = engine.scan().map_err(err)?;
+        let (entries, warnings) = engine.list_all().map_err(err)?;
         Ok(ScanView {
-            sessions: report
-                .records
+            sessions: entries
                 .iter()
-                .map(|record| session_view(&record.meta))
+                .map(|entry| session_view(&entry.meta, entry.local, entry.remote))
                 .collect(),
-            warnings: report.warnings,
+            warnings,
         })
     })
     .await
@@ -340,6 +365,7 @@ async fn pull_store() -> Result<PullView, String> {
 #[tauri::command]
 async fn restore_session(
     id: String,
+    timeline_id: Option<String>,
     agent: Option<String>,
     cwd: Option<String>,
 ) -> Result<RestoreView, String> {
@@ -351,21 +377,30 @@ async fn restore_session(
             .map(Agent::from_str)
             .transpose()
             .map_err(err)?;
+        let timeline_id = non_empty(timeline_id);
         let cwd_path = non_empty(cwd).map(PathBuf::from);
-        let outcome = engine
-            .restore(&id, parsed_agent, cwd_path.as_deref(), false)
-            .map_err(err)?;
+        let outcome = if let (Some(agent), Some(timeline)) = (parsed_agent, timeline_id.as_deref())
+        {
+            engine.restore_timeline(agent, timeline, cwd_path.as_deref(), false)
+        } else {
+            engine.restore(&id, parsed_agent, cwd_path.as_deref(), false)
+        }
+        .map_err(err)?;
 
-        let meta = match parsed_agent {
-            Some(agent) => engine.store.find(agent, &outcome.native_id).map_err(err)?,
-            None => engine
-                .store
-                .find(Agent::Codex, &outcome.native_id)
-                .map_err(err)?
-                .or(engine
+        let meta = if let (Some(agent), Some(timeline)) = (parsed_agent, timeline_id.as_deref()) {
+            engine.store.find(agent, timeline).map_err(err)?
+        } else {
+            match parsed_agent {
+                Some(agent) => engine.store.find(agent, &outcome.native_id).map_err(err)?,
+                None => engine
                     .store
-                    .find(Agent::Claude, &outcome.native_id)
-                    .map_err(err)?),
+                    .find(Agent::Codex, &outcome.native_id)
+                    .map_err(err)?
+                    .or(engine
+                        .store
+                        .find(Agent::Claude, &outcome.native_id)
+                        .map_err(err)?),
+            }
         };
         let hint = meta
             .as_ref()
@@ -388,6 +423,7 @@ async fn save_settings(
     save_mode: String,
     agents: AgentSettings,
     wsl: Vec<WslSourceView>,
+    paths: Vec<PathMappingView>,
 ) -> Result<ConfigView, String> {
     blocking(move || {
         let mut config = load_config()?;
@@ -402,6 +438,18 @@ async fn save_settings(
                 codex_home: non_empty(source.codex_home),
                 claude_home: non_empty(source.claude_home),
                 unc_root: None,
+            })
+            .collect();
+        config.paths = paths
+            .into_iter()
+            .filter(|mapping| !mapping.key.trim().is_empty())
+            .filter_map(|mapping| {
+                let path = mapping.path.trim().to_string();
+                if path.is_empty() {
+                    None
+                } else {
+                    Some((mapping.key.trim().to_string(), path))
+                }
             })
             .collect();
         config.save().map_err(err)?;
@@ -481,7 +529,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_config,
             init_store,
-            scan_sessions,
+            list_sessions,
             sync_status,
             push_store,
             pull_store,

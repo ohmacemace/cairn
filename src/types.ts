@@ -12,6 +12,11 @@ export interface WslSourceView {
   claudeHome?: string | null;
 }
 
+export interface PathMappingView {
+  key: string;
+  path: string;
+}
+
 export interface ConfigView {
   machineName: string;
   storePath: string;
@@ -19,10 +24,14 @@ export interface ConfigView {
   saveMode: SaveMode;
   agents: AgentSettings;
   wsl: WslSourceView[];
+  paths: PathMappingView[];
 }
 
 export interface SessionView {
   id: string;
+  timelineId: string;
+  familyId: string;
+  parentTimeline?: string | null;
   agent: Agent;
   title: string;
   project: string;
@@ -32,6 +41,8 @@ export interface SessionView {
   source?: string | null;
   wslDistro?: string | null;
   machineName: string;
+  local: boolean;
+  remote: boolean;
 }
 
 export interface ScanResult {

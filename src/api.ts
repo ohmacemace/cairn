@@ -3,6 +3,7 @@ import type {
   Agent,
   ConfigView,
   DoctorResult,
+  PathMappingView,
   PullResult,
   PushResult,
   RestoreResult,
@@ -24,11 +25,15 @@ let mockConfig: ConfigView | null = {
   saveMode: "standard",
   agents: { codex: true, claude: true },
   wsl: [{ distro: "Ubuntu", codexHome: "/home/you/.codex", claudeHome: "/home/you/.claude" }],
+  paths: [{ key: "git:github.com/acme/payments", path: "~/code/payments" }],
 };
 
 let mockSessions: SessionView[] = [
   {
     id: "01a1b1a0-2239-7012-829e-fc4ff70993b7",
+    timelineId: "01a1b1a0-2239-7012-829e-fc4ff70993b7",
+    familyId: "01a1b1a0-2239-7012-829e-fc4ff70993b7",
+    parentTimeline: null,
     agent: "codex",
     title: "重构支付模块",
     project: "git:github.com/acme/payments",
@@ -38,9 +43,31 @@ let mockSessions: SessionView[] = [
     source: "cli",
     wslDistro: null,
     machineName: "macbook",
+    local: true,
+    remote: true,
+  },
+  {
+    id: "01a1b1a0-2239-7012-829e-fc4ff70993b7",
+    timelineId: "7c2f6e4a-1b2c-4d5e-8f90-123456789abc",
+    familyId: "01a1b1a0-2239-7012-829e-fc4ff70993b7",
+    parentTimeline: "01a1b1a0-2239-7012-829e-fc4ff70993b7",
+    agent: "codex",
+    title: "重构支付模块（分叉）",
+    project: "git:github.com/acme/payments",
+    cwd: "/home/you/code/payments",
+    updatedAt: now - 1800,
+    sizeBytes: 1_960_000,
+    source: "cli",
+    wslDistro: null,
+    machineName: "windows-box",
+    local: false,
+    remote: true,
   },
   {
     id: "cf4f3229-7204-4bd9-ae29-a9d9d89ee421",
+    timelineId: "cf4f3229-7204-4bd9-ae29-a9d9d89ee421",
+    familyId: "cf4f3229-7204-4bd9-ae29-a9d9d89ee421",
+    parentTimeline: null,
     agent: "claude",
     title: "我想做一个开源项目",
     project: "git:github.com/you/cairn",
@@ -50,9 +77,14 @@ let mockSessions: SessionView[] = [
     source: "cli",
     wslDistro: null,
     machineName: "linux-desktop",
+    local: true,
+    remote: true,
   },
   {
     id: "44444444-4444-4444-8444-444444444444",
+    timelineId: "44444444-4444-4444-8444-444444444444",
+    familyId: "44444444-4444-4444-8444-444444444444",
+    parentTimeline: null,
     agent: "codex",
     title: "Fix the WSL build",
     project: "local:wsl-proj",
@@ -62,6 +94,8 @@ let mockSessions: SessionView[] = [
     source: "cli",
     wslDistro: "Ubuntu",
     machineName: "windows-box (WSL: Ubuntu)",
+    local: true,
+    remote: false,
   },
 ];
 
@@ -83,15 +117,16 @@ export async function initStore(
       saveMode: "standard",
       agents: { codex: true, claude: true },
       wsl: [],
+      paths: [],
     };
     return mockConfig;
   }
   return invoke<ConfigView>("init_store", { storePath, remote, machineName });
 }
 
-export async function scanSessions(): Promise<ScanResult> {
+export async function listSessions(): Promise<ScanResult> {
   if (!isTauri) return { sessions: mockSessions, warnings: [] };
-  return invoke<ScanResult>("scan_sessions");
+  return invoke<ScanResult>("list_sessions");
 }
 
 export async function syncStatus(): Promise<StatusView> {
@@ -136,11 +171,12 @@ export async function pullStore(): Promise<PullResult> {
 
 export async function restoreSession(
   id: string,
+  timelineId: string,
   agent: Agent,
   cwd: string | null,
 ): Promise<RestoreResult> {
   if (!isTauri) {
-    const session = mockSessions.find((item) => item.id === id);
+    const session = mockSessions.find((item) => item.timelineId === timelineId);
     const target = cwd || session?.cwd || "~";
     return {
       imported: true,
@@ -153,19 +189,20 @@ export async function restoreSession(
           : `claude --resume ${id}`,
     };
   }
-  return invoke<RestoreResult>("restore_session", { id, agent, cwd });
+  return invoke<RestoreResult>("restore_session", { id, timelineId, agent, cwd });
 }
 
 export async function saveSettings(
   saveMode: ConfigView["saveMode"],
   agents: ConfigView["agents"],
   wsl: WslSourceView[],
+  paths: PathMappingView[],
 ): Promise<ConfigView> {
   if (!isTauri && mockConfig) {
-    mockConfig = { ...mockConfig, saveMode, agents, wsl };
+    mockConfig = { ...mockConfig, saveMode, agents, wsl, paths };
     return mockConfig;
   }
-  return invoke<ConfigView>("save_settings", { saveMode, agents, wsl });
+  return invoke<ConfigView>("save_settings", { saveMode, agents, wsl, paths });
 }
 
 export async function runDoctor(): Promise<DoctorResult> {
