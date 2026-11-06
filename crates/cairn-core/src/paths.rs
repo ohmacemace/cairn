@@ -19,7 +19,101 @@ pub fn expand_tilde(raw: &str) -> PathBuf {
     if let Some(rest) = raw.strip_prefix("~/") {
         return home_dir().join(rest);
     }
+    if let Some(rest) = raw.strip_prefix("~\\") {
+        return home_dir().join(rest);
+    }
     PathBuf::from(raw)
+}
+
+/// Normalize a path for cross-platform comparison.
+/// This is intentionally not used for display or file access: it only powers
+/// project identity and equality checks.
+pub fn normalize_path_key(raw: &str) -> String {
+    normalize_path_key_impl(raw, cfg!(any(windows, target_os = "macos")))
+}
+
+fn normalize_path_key_impl(raw: &str, casefold: bool) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    let mut path = trimmed.replace('\\', "/");
+    if path.starts_with("//") {
+        path = format!("//{}", path[2..].replace("//", "/"));
+    } else {
+        while path.contains("//") {
+            path = path.replace("//", "/");
+        }
+    }
+
+    if path.len() >= 2 && path.as_bytes()[1] == b':' && path.as_bytes()[0].is_ascii_alphabetic() {
+        let upper = path[..1].to_ascii_uppercase();
+        path.replace_range(..1, &upper);
+    }
+
+    let is_root = path == "/" || path == "//";
+    let is_drive_root = path.len() == 3 && path.as_bytes()[1] == b':' && path.ends_with('/');
+    if !is_root && !is_drive_root && path.ends_with('/') {
+        path.pop();
+    }
+
+    if casefold {
+        path.make_ascii_lowercase();
+    }
+    path
+}
+
+pub fn paths_equivalent(a: &str, b: &str) -> bool {
+    normalize_path_key(a) == normalize_path_key(b)
+}
+
+fn path_variants(raw: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    push_unique(&mut out, raw.to_string());
+    push_unique(&mut out, raw.replace('\\', "/"));
+    push_unique(&mut out, raw.replace('/', "\\"));
+
+    if raw.len() >= 2 && raw.as_bytes()[1] == b':' && raw.as_bytes()[0].is_ascii_alphabetic() {
+        let mut lower = raw.to_string();
+        lower.replace_range(..1, &raw[..1].to_ascii_lowercase());
+        push_unique(&mut out, lower);
+        let mut upper = raw.to_string();
+        upper.replace_range(..1, &raw[..1].to_ascii_uppercase());
+        push_unique(&mut out, upper);
+    }
+
+    out
+}
+
+fn push_unique(out: &mut Vec<String>, value: String) {
+    if !value.is_empty() && !out.contains(&value) {
+        out.push(value);
+    }
+}
+
+/// Split one `split_inclusive(b'\n')` chunk into (line without EOL, has_cr, has_lf).
+pub fn split_line_ending(chunk: &[u8]) -> (&[u8], bool, bool) {
+    let has_newline = chunk.last() == Some(&b'\n');
+    let mut line = if has_newline {
+        &chunk[..chunk.len() - 1]
+    } else {
+        chunk
+    };
+    let has_cr = line.last() == Some(&b'\r');
+    if has_cr {
+        line = &line[..line.len() - 1];
+    }
+    (line, has_cr, has_newline)
+}
+
+pub fn push_line_ending(out: &mut Vec<u8>, has_cr: bool, has_newline: bool) {
+    if has_cr {
+        out.push(b'\r');
+    }
+    if has_newline {
+        out.push(b'\n');
+    }
 }
 
 /// Normalize common git remote URL forms into `host/owner/repo`.
@@ -109,7 +203,7 @@ pub fn project_key(cwd: &Path, remote: Option<&str>) -> String {
         .unwrap_or_else(|| "project".to_string());
     format!(
         "local:{name}-{}",
-        short_hash(cwd.to_string_lossy().as_bytes(), 8)
+        short_hash(normalize_path_key(&cwd.to_string_lossy()).as_bytes(), 8)
     )
 }
 
@@ -139,6 +233,7 @@ pub fn claude_project_dir_for(home: &Path, cwd: &Path) -> PathBuf {
 }
 
 fn dir_contains_cwd(dir: &Path, cwd: &Path) -> bool {
+    let target = cwd.to_string_lossy();
     let Ok(entries) = std::fs::read_dir(dir) else {
         return false;
     };
@@ -151,9 +246,12 @@ fn dir_contains_cwd(dir: &Path, cwd: &Path) -> bool {
             let mut reader = BufReader::new(file);
             let mut line = String::new();
             if reader.read_line(&mut line).is_ok() {
-                if let Ok(value) = serde_json::from_str::<Value>(&line) {
-                    if value.get("cwd").and_then(Value::as_str) == Some(&cwd.to_string_lossy()) {
-                        return true;
+                let line = line.trim_end_matches(['\r', '\n']);
+                if let Ok(value) = serde_json::from_str::<Value>(line) {
+                    if let Some(session_cwd) = value.get("cwd").and_then(Value::as_str) {
+                        if paths_equivalent(session_cwd, &target) {
+                            return true;
+                        }
                     }
                 }
             }
@@ -170,54 +268,51 @@ pub fn rewrite_cwd(content: &[u8], old: &str, new: &str) -> Vec<u8> {
         return content.to_vec();
     }
 
+    let variants = path_variants(old);
     let mut out = Vec::with_capacity(content.len());
     for chunk in content.split_inclusive(|b| *b == b'\n') {
-        let has_newline = chunk.last() == Some(&b'\n');
-        let line = if has_newline {
-            &chunk[..chunk.len() - 1]
-        } else {
-            chunk
-        };
+        let (line, has_cr, has_newline) = split_line_ending(chunk);
         if line.is_empty() {
-            if has_newline {
-                out.push(b'\n');
-            }
+            push_line_ending(&mut out, has_cr, has_newline);
             continue;
         }
         match serde_json::from_slice::<Value>(line) {
             Ok(mut value) => {
-                rewrite_value(&mut value, old, new);
+                rewrite_value(&mut value, &variants, new);
                 if serde_json::to_writer(&mut out, &value).is_err() {
                     out.extend_from_slice(line);
                 }
             }
             Err(_) => {
-                let text = String::from_utf8_lossy(line);
-                out.extend_from_slice(text.replace(old, new).as_bytes());
+                let mut text = String::from_utf8_lossy(line).to_string();
+                for variant in &variants {
+                    text = text.replace(variant, new);
+                }
+                out.extend_from_slice(text.as_bytes());
             }
         }
-        if has_newline {
-            out.push(b'\n');
-        }
+        push_line_ending(&mut out, has_cr, has_newline);
     }
     out
 }
 
-fn rewrite_value(value: &mut Value, old: &str, new: &str) {
+fn rewrite_value(value: &mut Value, old_variants: &[String], new: &str) {
     match value {
         Value::String(s) => {
-            if s.contains(old) {
-                *s = s.replace(old, new);
+            for old in old_variants {
+                if s.contains(old) {
+                    *s = s.replace(old, new);
+                }
             }
         }
         Value::Array(items) => {
             for item in items {
-                rewrite_value(item, old, new);
+                rewrite_value(item, old_variants, new);
             }
         }
         Value::Object(map) => {
             for (_, item) in map.iter_mut() {
-                rewrite_value(item, old, new);
+                rewrite_value(item, old_variants, new);
             }
         }
         _ => {}
@@ -324,6 +419,45 @@ mod tests {
         assert_eq!(
             String::from_utf8(restored).unwrap(),
             "{\"cwd\":\"/home/b/proj\",\"text\":\"/home/b/proj foo\"}\n"
+        );
+    }
+
+    #[test]
+    fn normalizes_cross_platform_paths() {
+        assert_eq!(
+            normalize_path_key_impl("c:\\Users\\mace\\proj\\", false),
+            "C:/Users/mace/proj"
+        );
+        assert_eq!(
+            normalize_path_key_impl("C:/Users/Mace/Proj", true),
+            "c:/users/mace/proj"
+        );
+        assert_eq!(normalize_path_key_impl("/", false), "/");
+        assert_eq!(normalize_path_key_impl("C:/", false), "C:/");
+        assert!(paths_equivalent("/home/a/proj/", "/home/a/proj"));
+        assert!(paths_equivalent(
+            "C:\\Users\\mace\\proj",
+            "c:/Users/mace/proj"
+        ));
+    }
+
+    #[test]
+    fn rewrite_cwd_handles_windows_separators() {
+        let raw = b"{\"cwd\":\"C:\\\\Users\\\\a\\\\proj\",\"text\":\"C:/Users/a/proj\"}\n";
+        let out = rewrite_cwd(raw, "C:\\Users\\a\\proj", "D:\\work\\proj");
+        let text = String::from_utf8(out).unwrap();
+        let value: Value = serde_json::from_str(text.trim()).unwrap();
+        assert_eq!(value["cwd"], "D:\\work\\proj");
+        assert_eq!(value["text"], "D:\\work\\proj");
+    }
+
+    #[test]
+    fn rewrite_cwd_preserves_crlf() {
+        let raw = b"{\"cwd\":\"/home/a/proj\"}\r\n{\"cwd\":\"/home/a/proj\"}\r\n";
+        let out = rewrite_cwd(raw, "/home/a/proj", "/home/b/proj");
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "{\"cwd\":\"/home/b/proj\"}\r\n{\"cwd\":\"/home/b/proj\"}\r\n"
         );
     }
 }

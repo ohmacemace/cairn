@@ -13,7 +13,7 @@ use crate::model::{
 };
 use crate::paths::{
     claude_project_dir_for, clean_title, file_mtime, is_command_text, now_ts, parse_timestamp,
-    project_identity, rewrite_cwd, CWD_PLACEHOLDER,
+    project_identity, push_line_ending, rewrite_cwd, split_line_ending, CWD_PLACEHOLDER,
 };
 
 const DROP_TYPES: &[&str] = &[
@@ -67,7 +67,8 @@ impl ClaudeAdapter {
         let mut model: Option<String> = None;
         let mut source: Option<String> = None;
 
-        for line in raw.split(|b| *b == b'\n') {
+        for chunk in raw.split_inclusive(|b| *b == b'\n') {
+            let (line, _, _) = split_line_ending(chunk);
             if line.is_empty() {
                 continue;
             }
@@ -359,23 +360,14 @@ fn extract_user_text(value: &Value) -> Option<String> {
 fn standardize(raw: &[u8], max_text: usize, keep_attachments: bool) -> Vec<u8> {
     let mut out = Vec::with_capacity(raw.len());
     for chunk in raw.split_inclusive(|b| *b == b'\n') {
-        let has_newline = chunk.last() == Some(&b'\n');
-        let line = if has_newline {
-            &chunk[..chunk.len() - 1]
-        } else {
-            chunk
-        };
+        let (line, has_cr, has_newline) = split_line_ending(chunk);
         if line.is_empty() {
-            if has_newline {
-                out.push(b'\n');
-            }
+            push_line_ending(&mut out, has_cr, has_newline);
             continue;
         }
         let Ok(mut value) = serde_json::from_slice::<Value>(line) else {
             out.extend_from_slice(line);
-            if has_newline {
-                out.push(b'\n');
-            }
+            push_line_ending(&mut out, has_cr, has_newline);
             continue;
         };
         let kind = value
@@ -403,9 +395,7 @@ fn standardize(raw: &[u8], max_text: usize, keep_attachments: bool) -> Vec<u8> {
         if serde_json::to_writer(&mut out, &value).is_err() {
             out.extend_from_slice(line);
         }
-        if has_newline {
-            out.push(b'\n');
-        }
+        push_line_ending(&mut out, has_cr, has_newline);
     }
     out
 }
@@ -449,5 +439,35 @@ fn truncate_value(value: &mut Value, limit: usize) {
             }
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn standardize_preserves_crlf_and_drops_internal_lines() {
+        let raw = b"{\"type\":\"mode\"}\r\n{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"hi\"}}\r\n";
+        let out = standardize(raw, 8192, false);
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.ends_with("\r\n"));
+        assert_eq!(text.matches('\n').count(), 1);
+        let value: Value = serde_json::from_str(text.trim()).unwrap();
+        assert_eq!(value["type"], "user");
+        assert_eq!(value["message"]["content"], "hi");
+    }
+
+    #[test]
+    fn standardize_keeps_attachment_chain_node() {
+        let raw = b"{\"type\":\"user\",\"uuid\":\"u1\",\"message\":{\"role\":\"user\",\"content\":\"hi\"}}\n{\"type\":\"attachment\",\"uuid\":\"a1\",\"parentUuid\":\"u1\",\"attachment\":{\"big\":\"payload\"},\"rendered\":\"big\"}\n{\"type\":\"user\",\"uuid\":\"u2\",\"parentUuid\":\"a1\",\"message\":{\"role\":\"user\",\"content\":\"again\"}}\n";
+        let out = standardize(raw, 8192, false);
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("\"type\":\"attachment\""));
+        assert!(text.contains("\"uuid\":\"a1\""));
+        assert!(text.contains("\"parentUuid\":\"u1\""));
+        assert!(text.contains("cairn_omitted"));
+        assert!(!text.contains("payload"));
+        assert_eq!(text.matches('\n').count(), 3);
     }
 }
