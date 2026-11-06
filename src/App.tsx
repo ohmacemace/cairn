@@ -130,7 +130,7 @@ function Welcome({
               placeholder="~/Cairn"
               autoFocus
             />
-            <small>本地 clone 的位置；支持 ~</small>
+            <small>默认 ~/Cairn，之后可在设置里更改</small>
           </label>
 
           <label>
@@ -140,7 +140,7 @@ function Welcome({
               onChange={(e) => setRemote(e.target.value)}
               placeholder="git@github.com:you/cairn-store.git"
             />
-            <small>建议使用私有仓库。留空则先建立本地仓库。</small>
+            <small>建议使用私有仓库。留空则只保存在本机，不会同步到其他设备。</small>
           </label>
 
           <label>
@@ -195,6 +195,7 @@ function Workspace({
   const [toast, setToast] = useState<{ kind: "ok" | "error"; text: string } | null>(
     null,
   );
+  const hasRemote = Boolean(config.remote);
 
   const refresh = async (showSpinner = true) => {
     if (showSpinner) setBusy("refresh");
@@ -265,7 +266,9 @@ function Workspace({
           : "";
         setToast({
           kind: "ok",
-          text: `已推送：新增 ${result.added}，更新 ${result.updated}，未变 ${result.unchanged}${conflictText}`,
+          text: hasRemote
+            ? `已推送：新增 ${result.added}，更新 ${result.updated}，未变 ${result.unchanged}${conflictText}`
+            : t("workspace.pushedLocal"),
         });
       } else {
         const result = await pullStore();
@@ -346,15 +349,16 @@ function Workspace({
             disabled={busy !== null}
           >
             {busy === "push" ? <Loader2 className="spin" size={15} /> : <ArrowUp size={15} />}
-            推送
+            {hasRemote ? t("workspace.push") : t("workspace.pushLocal")}
           </button>
           <button
             className="button primary"
             onClick={() => void sync("pull")}
-            disabled={busy !== null}
+            disabled={busy !== null || !hasRemote}
+            title={!hasRemote ? t("workspace.localOnly") : undefined}
           >
             {busy === "pull" ? <Loader2 className="spin" size={15} /> : <ArrowDown size={15} />}
-            拉取
+            {t("workspace.pull")}
           </button>
           <button
             className={`button ghost ${view === "settings" ? "active" : ""}`}
@@ -477,6 +481,12 @@ function Workspace({
                   placeholder="搜索标题、项目、路径…"
                 />
               </div>
+              {!hasRemote && (
+                <div className="alert warn">
+                  <AlertTriangle size={15} />
+                  <span>{t("workspace.localOnly")}</span>
+                </div>
+              )}
               {warnings.length > 0 && (
                 <div className="alert warn">
                   <AlertTriangle size={15} />
@@ -914,7 +924,7 @@ function SettingsPanel({
             </div>
             <div className="kv">
               <span>{t("settings.remote")}</span>
-              <code>{config.remote || t("settings.unconfigured")}</code>
+              <code>{config.remote || t("settings.localOnly")}</code>
             </div>
             <div className="kv">
               <span>{t("settings.machine")}</span>
