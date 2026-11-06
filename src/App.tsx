@@ -17,14 +17,12 @@ import {
   WifiOff,
 } from "lucide-react";
 import {
-  addRepository,
   getConfig,
   initStore,
   isDesktop,
   listSessions,
   pullStore,
   pushStore,
-  removeRepository,
   restoreSession,
   runDoctor,
   saveSettings,
@@ -36,7 +34,6 @@ import { t } from "./i18n";
 import type {
   Agent,
   ConfigView,
-  RepositoryView,
   SessionView,
   StatusView,
   WslSourceView,
@@ -779,9 +776,6 @@ function SettingsPanel({
   const [saveMode, setSaveMode] = useState(config.saveMode);
   const [agents, setAgents] = useState(config.agents);
   const [wsl, setWsl] = useState<WslSourceView[]>(config.wsl);
-  const [repositories, setRepositories] = useState<RepositoryView[]>(
-    config.repositories,
-  );
   const [busy, setBusy] = useState(false);
   const [editingStore, setEditingStore] = useState(false);
   const [storePath, setStorePath] = useState(config.storePath);
@@ -792,30 +786,6 @@ function SettingsPanel({
     setWsl((current) =>
       current.map((item, i) => (i === index ? { ...item, ...patch } : item)),
     );
-  }
-
-  async function addProject() {
-    const picked = await pickDirectory();
-    if (!picked) return;
-    try {
-      const next = await addRepository(picked);
-      setRepositories(next.repositories);
-      onConfigChange(next);
-      onToast({ kind: "ok", text: t("settings.repositoryAdded") });
-    } catch (err) {
-      onToast({ kind: "error", text: String(err) });
-    }
-  }
-
-  async function removeProject(key: string) {
-    try {
-      const next = await removeRepository(key);
-      setRepositories(next.repositories);
-      onConfigChange(next);
-      onToast({ kind: "ok", text: t("settings.repositoryRemoved") });
-    } catch (err) {
-      onToast({ kind: "error", text: String(err) });
-    }
   }
 
   async function save() {
@@ -886,7 +856,10 @@ function SettingsPanel({
 
       <section className="settings-card">
         <div className="settings-head">
-          <h3>{t("settings.repo")}</h3>
+          <div>
+            <h3>{t("settings.repo")}</h3>
+            <p className="muted">{t("settings.repoHint")}</p>
+          </div>
           {!editingStore && (
             <button className="button ghost" onClick={startEditStore}>
               {t("settings.changeRepo")}
@@ -946,6 +919,14 @@ function SettingsPanel({
             <div className="kv">
               <span>{t("settings.machine")}</span>
               <code>{config.machineName}</code>
+            </div>
+            <div className="kv">
+              <span>{t("settings.configFile")}</span>
+              <code>{config.configPath}</code>
+            </div>
+            <div className="kv">
+              <span>{t("settings.storeManifest")}</span>
+              <code>{config.storeManifest}</code>
             </div>
           </>
         )}
@@ -1022,39 +1003,6 @@ function SettingsPanel({
             <button
               className="icon-button danger"
               onClick={() => setWsl(wsl.filter((_, i) => i !== index))}
-              title={t("settings.remove")}
-            >
-              ×
-            </button>
-          </div>
-        ))}
-      </section>
-
-      <section className="settings-card">
-        <div className="settings-head">
-          <div>
-            <h3>{t("settings.repositories")}</h3>
-            <p className="muted">{t("settings.repositoriesHint")}</p>
-          </div>
-          <button className="button ghost" onClick={() => void addProject()}>
-            + {t("settings.addRepository")}
-          </button>
-        </div>
-
-        {repositories.length === 0 && (
-          <p className="muted">{t("settings.repositoriesEmpty")}</p>
-        )}
-        {repositories.map((repository) => (
-          <div className="repo-row" key={repository.key}>
-            <div className="repo-main">
-              <strong>
-                {repository.remote || prettyProject(repository.key)}
-              </strong>
-              <code>{repository.path}</code>
-            </div>
-            <button
-              className="icon-button danger"
-              onClick={() => void removeProject(repository.key)}
               title={t("settings.remove")}
             >
               ×

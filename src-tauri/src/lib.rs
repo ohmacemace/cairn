@@ -5,7 +5,7 @@ use std::str::FromStr;
 use cairn_core::config::{Config, WslSource};
 use cairn_core::git;
 use cairn_core::model::{Agent, SaveMode, SessionMeta};
-use cairn_core::paths::{expand_tilde, project_identity};
+use cairn_core::paths::expand_tilde;
 use cairn_core::store::Store;
 use cairn_core::sync::SyncEngine;
 use serde::{Deserialize, Serialize};
@@ -27,14 +27,6 @@ struct WslSourceView {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct RepositoryView {
-    key: String,
-    remote: Option<String>,
-    path: String,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
 struct ConfigView {
     machine_name: String,
     store_path: String,
@@ -42,7 +34,8 @@ struct ConfigView {
     save_mode: String,
     agents: AgentSettings,
     wsl: Vec<WslSourceView>,
-    repositories: Vec<RepositoryView>,
+    config_path: String,
+    store_manifest: String,
 }
 
 impl ConfigView {
@@ -69,15 +62,8 @@ impl ConfigView {
                     claude_home: source.claude_home.clone(),
                 })
                 .collect(),
-            repositories: config
-                .paths
-                .iter()
-                .map(|(key, path)| RepositoryView {
-                    key: key.clone(),
-                    remote: key.strip_prefix("git:").map(ToOwned::to_owned),
-                    path: path.clone(),
-                })
-                .collect(),
+            config_path: Config::config_path().display().to_string(),
+            store_manifest: config.store_path().join("cairn.json").display().to_string(),
         }
     }
 }
@@ -481,33 +467,6 @@ async fn restore_session(
 }
 
 #[tauri::command]
-async fn add_repository(path: String) -> Result<ConfigView, String> {
-    blocking(move || {
-        let mut config = load_config()?;
-        let path = expand_tilde(&path);
-        if !path.exists() {
-            return Err(format!("path does not exist: {}", path.display()));
-        }
-        let (key, _, _) = project_identity(&path);
-        config.paths.insert(key, path.to_string_lossy().to_string());
-        config.save().map_err(err)?;
-        Ok(ConfigView::from_config(&config))
-    })
-    .await
-}
-
-#[tauri::command]
-async fn remove_repository(key: String) -> Result<ConfigView, String> {
-    blocking(move || {
-        let mut config = load_config()?;
-        config.paths.remove(&key);
-        config.save().map_err(err)?;
-        Ok(ConfigView::from_config(&config))
-    })
-    .await
-}
-
-#[tauri::command]
 async fn save_settings(
     save_mode: String,
     agents: AgentSettings,
@@ -612,8 +571,6 @@ pub fn run() {
             push_store,
             pull_store,
             restore_session,
-            add_repository,
-            remove_repository,
             save_settings,
             run_doctor
         ])

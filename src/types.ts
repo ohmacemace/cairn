@@ -12,12 +12,6 @@ export interface WslSourceView {
   claudeHome?: string | null;
 }
 
-export interface RepositoryView {
-  key: string;
-  remote?: string | null;
-  path: string;
-}
-
 export interface ConfigView {
   machineName: string;
   storePath: string;
@@ -25,7 +19,8 @@ export interface ConfigView {
   saveMode: SaveMode;
   agents: AgentSettings;
   wsl: WslSourceView[];
-  repositories: RepositoryView[];
+  configPath: string;
+  storeManifest: string;
 }
 
 export interface SessionView {

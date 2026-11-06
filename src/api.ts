@@ -5,7 +5,6 @@ import type {
   DoctorResult,
   PullResult,
   PushResult,
-  RepositoryView,
   RestoreResult,
   ScanResult,
   SessionView,
@@ -25,13 +24,8 @@ let mockConfig: ConfigView | null = {
   saveMode: "standard",
   agents: { codex: true, claude: true },
   wsl: [{ distro: "Ubuntu", codexHome: "/home/you/.codex", claudeHome: "/home/you/.claude" }],
-  repositories: [
-    {
-      key: "git:github.com/acme/payments",
-      remote: "github.com/acme/payments",
-      path: "~/code/payments",
-    },
-  ],
+  configPath: "~/.config/cairn/config.toml",
+  storeManifest: "~/Cairn/cairn.json",
 };
 
 let mockSessions: SessionView[] = [
@@ -131,7 +125,8 @@ export async function initStore(
       saveMode: "standard",
       agents: { codex: true, claude: true },
       wsl: [],
-      repositories: [],
+      configPath: "~/.config/cairn/config.toml",
+      storeManifest: `${storePath.replace(/\/$/, "")}/cairn.json`,
     };
     return mockConfig;
   }
@@ -213,33 +208,6 @@ export async function restoreSession(
   });
 }
 
-export async function addRepository(path: string): Promise<ConfigView> {
-  if (!isTauri && mockConfig) {
-    const repository: RepositoryView = {
-      key: `local:${path}`,
-      remote: null,
-      path,
-    };
-    mockConfig = {
-      ...mockConfig,
-      repositories: [...mockConfig.repositories, repository],
-    };
-    return mockConfig;
-  }
-  return invoke<ConfigView>("add_repository", { path });
-}
-
-export async function removeRepository(key: string): Promise<ConfigView> {
-  if (!isTauri && mockConfig) {
-    mockConfig = {
-      ...mockConfig,
-      repositories: mockConfig.repositories.filter((repo) => repo.key !== key),
-    };
-    return mockConfig;
-  }
-  return invoke<ConfigView>("remove_repository", { key });
-}
-
 export async function updateStore(
   storePath: string,
   remote: string | null,
@@ -249,6 +217,7 @@ export async function updateStore(
     mockConfig = {
       ...mockConfig,
       storePath,
+      storeManifest: `${storePath.replace(/\/$/, "")}/cairn.json`,
       remote,
       machineName: machineName?.trim() || mockConfig.machineName,
     };
