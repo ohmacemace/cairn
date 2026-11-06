@@ -58,6 +58,53 @@ impl Default for SaveConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WslSource {
+    pub distro: String,
+    /// Linux home path inside the distro, e.g. `/home/mace/.codex`.
+    #[serde(default)]
+    pub codex_home: Option<String>,
+    /// Linux home path inside the distro, e.g. `/home/mace/.claude`.
+    #[serde(default)]
+    pub claude_home: Option<String>,
+    /// Override the UNC root. Defaults to `\\wsl.localhost\<distro>`.
+    /// Useful for tests and unusual WSL setups.
+    #[serde(default)]
+    pub unc_root: Option<String>,
+}
+
+impl WslSource {
+    pub fn root(&self) -> PathBuf {
+        match &self.unc_root {
+            Some(root) => expand_tilde(root),
+            None => PathBuf::from(format!(r"\\wsl.localhost\{}", self.distro)),
+        }
+    }
+
+    pub fn codex_home(&self) -> Option<PathBuf> {
+        self.codex_home
+            .as_deref()
+            .map(|path| join_linux_path(&self.root(), path))
+    }
+
+    pub fn claude_home(&self) -> Option<PathBuf> {
+        self.claude_home
+            .as_deref()
+            .map(|path| join_linux_path(&self.root(), path))
+    }
+}
+
+/// Join a Linux path onto a host path (typically a WSL UNC root).
+pub fn join_linux_path(root: &Path, linux: &str) -> PathBuf {
+    let mut out = root.to_path_buf();
+    for part in linux.trim_matches('/').split('/') {
+        if !part.is_empty() {
+            out.push(part);
+        }
+    }
+    out
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub schema: u32,
     pub machine_id: String,
@@ -67,6 +114,8 @@ pub struct Config {
     pub save: SaveConfig,
     #[serde(default)]
     pub paths: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub wsl: Vec<WslSource>,
     #[serde(default)]
     pub codex_home: Option<String>,
     #[serde(default)]
@@ -95,6 +144,7 @@ impl Config {
             },
             save: SaveConfig::default(),
             paths: BTreeMap::new(),
+            wsl: Vec::new(),
             codex_home: None,
             claude_home: None,
         }
@@ -292,5 +342,39 @@ pub fn write_atomic(path: &Path, data: &[u8]) -> Result<()> {
                 Err(Error::Io(err))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn joins_wsl_linux_paths() {
+        let source = WslSource {
+            distro: "Ubuntu".into(),
+            codex_home: Some("/home/mace/.codex".into()),
+            claude_home: Some("/home/mace/.claude".into()),
+            unc_root: Some("/tmp/fake-wsl".into()),
+        };
+        assert_eq!(
+            source.codex_home().unwrap(),
+            PathBuf::from("/tmp/fake-wsl/home/mace/.codex")
+        );
+        assert_eq!(
+            source.claude_home().unwrap(),
+            PathBuf::from("/tmp/fake-wsl/home/mace/.claude")
+        );
+    }
+
+    #[test]
+    fn defaults_wsl_root_to_unc() {
+        let source = WslSource {
+            distro: "Ubuntu".into(),
+            codex_home: None,
+            claude_home: None,
+            unc_root: None,
+        };
+        assert!(source.root().to_string_lossy().contains("wsl.localhost"));
     }
 }

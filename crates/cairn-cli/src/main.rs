@@ -175,6 +175,7 @@ fn cmd_scan(agent: Option<String>, json: bool) -> cairn_core::Result<()> {
                     "updated_at": r.meta.updated_at,
                     "size_bytes": r.meta.size_bytes,
                     "source": r.meta.source,
+                    "wsl_distro": r.meta.wsl_distro,
                 })
             })
             .collect();
@@ -187,11 +188,15 @@ fn cmd_scan(agent: Option<String>, json: bool) -> cairn_core::Result<()> {
         "AGENT", "ID", "PROJECT", "UPDATED", "SIZE"
     );
     for record in &report.records {
+        let project = match &record.meta.wsl_distro {
+            Some(distro) => format!("wsl:{distro}:{}", record.meta.project_key),
+            None => record.meta.project_key.clone(),
+        };
         println!(
             "{:<8} {:<38} {:<24} {:<18} {:>8}  {}",
             record.meta.agent.to_string(),
             record.meta.native_id,
-            short(&record.meta.project_key, 24),
+            short(&project, 24),
             human_time(record.meta.updated_at),
             human_bytes(record.meta.size_bytes),
             record.meta.title
@@ -343,6 +348,23 @@ fn cmd_doctor() -> cairn_core::Result<()> {
             }
             println!("  codex home: {}", config.codex_home().display());
             println!("  claude home: {}", config.claude_home().display());
+            if config.wsl.is_empty() {
+                println!("  wsl sources: none");
+            } else {
+                for source in &config.wsl {
+                    println!(
+                        "  wsl [{}] root: {}",
+                        source.distro,
+                        source.root().display()
+                    );
+                    if let Some(path) = source.codex_home() {
+                        println!("    codex:  {} (exists: {})", path.display(), path.exists());
+                    }
+                    if let Some(path) = source.claude_home() {
+                        println!("    claude: {} (exists: {})", path.display(), path.exists());
+                    }
+                }
+            }
         }
         Err(err) => println!("  {err}"),
     }

@@ -76,6 +76,10 @@ fn encode(cwd: &Path) -> String {
         .replace(['/', '\\', ':'], "-")
 }
 
+fn toml_path(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "\\\\")
+}
+
 fn write_claude_session(home: &Path, cwd: &Path, id: &str, crlf: bool) -> PathBuf {
     let dir = home.join("projects").join(encode(cwd));
     fs::create_dir_all(&dir).unwrap();
@@ -248,4 +252,141 @@ fn crlf_session_round_trip() {
     assert!(lf > 0);
     assert_eq!(lf, crlf, "restored file mixed CRLF and LF");
     assert!(!String::from_utf8_lossy(&content).contains("__CAIRN_CWD__"));
+}
+
+#[test]
+fn wsl_file_level_round_trip() {
+    let env = TestEnv::new();
+    let fake_root = env.root.join("fake-wsl");
+    let claude_home = fake_root.join("home").join("test").join(".claude");
+    let codex_home = fake_root.join("home").join("test").join(".codex");
+    fs::create_dir_all(&claude_home).unwrap();
+    fs::create_dir_all(
+        codex_home
+            .join("sessions")
+            .join("2026")
+            .join("01")
+            .join("01"),
+    )
+    .unwrap();
+
+    let claude_id = "33333333-3333-4333-8333-333333333333";
+    write_claude_session(&claude_home, Path::new("/home/test/proj"), claude_id, false);
+
+    let codex_id = "44444444-4444-4444-8444-444444444444";
+    let codex_path = codex_home
+        .join("sessions")
+        .join("2026")
+        .join("01")
+        .join("01")
+        .join(format!("rollout-2026-01-01T00-00-00-{codex_id}.jsonl"));
+    let lines = [
+        json!({
+            "type": "session_meta",
+            "payload": {
+                "id": codex_id,
+                "cwd": "/home/test/proj",
+                "timestamp": "2026-01-01T00:00:00Z",
+                "model_provider": "openai",
+                "source": "cli"
+            }
+        }),
+        json!({
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "Fix the WSL build"}]
+            }
+        }),
+    ];
+    let mut text = String::new();
+    for line in lines {
+        text.push_str(&serde_json::to_string(&line).unwrap());
+        text.push_str("\r\n");
+    }
+    fs::write(&codex_path, text).unwrap();
+
+    run_args(
+        &env,
+        &[
+            "init",
+            "--store",
+            env.store.to_str().unwrap(),
+            "--name",
+            "test",
+        ],
+    );
+    let mut config = fs::read_to_string(&env.config).unwrap();
+    config.push_str(&format!(
+        "\n[[wsl]]\ndistro = \"Ubuntu\"\ncodex_home = \"/home/test/.codex\"\nclaude_home = \"/home/test/.claude\"\nunc_root = \"{}\"\n",
+        toml_path(&fake_root)
+    ));
+    fs::write(&env.config, config).unwrap();
+
+    let out = run_args(&env, &["scan", "--json"]);
+    let items: Vec<Value> = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(items.len(), 2);
+    assert!(items
+        .iter()
+        .all(|item| item["wsl_distro"].as_str() == Some("Ubuntu")));
+    assert!(items.iter().any(|item| {
+        item["id"].as_str() == Some(claude_id) && item["title"].as_str() == Some("Fix the build")
+    }));
+    assert!(items.iter().any(|item| {
+        item["id"].as_str() == Some(codex_id) && item["title"].as_str() == Some("Fix the WSL build")
+    }));
+
+    run_args(&env, &["push"]);
+    assert!(env
+        .store
+        .join("threads")
+        .join("claude")
+        .join(claude_id)
+        .join("meta.json")
+        .exists());
+    assert!(env
+        .store
+        .join("threads")
+        .join("codex")
+        .join(codex_id)
+        .join("meta.json")
+        .exists());
+
+    run_args_with_claude(&env, &env.claude_b, &["pull"]);
+    assert_status_clean(&env, &env.claude_b);
+
+    run_args(
+        &env,
+        &[
+            "restore",
+            claude_id,
+            "--agent",
+            "claude",
+            "--cwd",
+            "/home/test/proj2",
+        ],
+    );
+    let restored = claude_home
+        .join("projects")
+        .join(encode(Path::new("/home/test/proj2")))
+        .join(format!("{claude_id}.jsonl"));
+    assert!(restored.exists(), "missing {}", restored.display());
+    let restored_text = fs::read_to_string(&restored).unwrap();
+    assert!(restored_text.contains("/home/test/proj2"));
+
+    run_args(
+        &env,
+        &[
+            "restore",
+            codex_id,
+            "--agent",
+            "codex",
+            "--cwd",
+            "/home/test/proj2",
+        ],
+    );
+    let codex_text = fs::read_to_string(&codex_path).unwrap();
+    assert!(codex_text.contains("/home/test/proj2"));
+    assert!(!codex_home.join("state_5.sqlite").exists());
 }

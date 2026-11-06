@@ -89,6 +89,9 @@ pub struct SessionMeta {
     pub source_path: Option<String>,
     /// Set when this timeline was forked from another timeline.
     pub parent_timeline: Option<String>,
+    /// WSL distro when the session lives inside WSL rather than the native host.
+    #[serde(default)]
+    pub wsl_distro: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

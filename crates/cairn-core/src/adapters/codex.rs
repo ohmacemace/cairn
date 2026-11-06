@@ -20,6 +20,7 @@ pub struct CodexAdapter {
     pub bin: String,
     pub save: SaveConfig,
     pub machine: MachineInfo,
+    pub wsl_distro: Option<String>,
 }
 
 impl CodexAdapter {
@@ -29,6 +30,7 @@ impl CodexAdapter {
             bin,
             save,
             machine,
+            wsl_distro: None,
         }
     }
 
@@ -104,6 +106,7 @@ impl AgentAdapter for CodexAdapter {
                 size_bytes: content.len() as u64,
                 source_path,
                 parent_timeline: None,
+                wsl_distro: self.wsl_distro.clone(),
             };
 
             records.push(SessionRecord {

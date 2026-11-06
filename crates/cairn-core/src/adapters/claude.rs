@@ -12,8 +12,9 @@ use crate::model::{
     BUNDLE_SCHEMA,
 };
 use crate::paths::{
-    claude_project_dir_for, clean_title, file_mtime, is_command_text, now_ts, parse_timestamp,
-    project_identity, push_line_ending, rewrite_cwd, split_line_ending, CWD_PLACEHOLDER,
+    claude_project_dir_for, clean_title, file_mtime, is_command_text, normalize_git_remote, now_ts,
+    parse_timestamp, project_identity, project_key, push_line_ending, rewrite_cwd,
+    split_line_ending, wsl_git_info, CWD_PLACEHOLDER,
 };
 
 const DROP_TYPES: &[&str] = &[
@@ -37,6 +38,7 @@ pub struct ClaudeAdapter {
     pub home: PathBuf,
     pub save: SaveConfig,
     pub machine: MachineInfo,
+    pub wsl_distro: Option<String>,
 }
 
 impl ClaudeAdapter {
@@ -45,6 +47,21 @@ impl ClaudeAdapter {
             home,
             save,
             machine,
+            wsl_distro: None,
+        }
+    }
+
+    pub fn new_wsl(
+        home: PathBuf,
+        save: SaveConfig,
+        machine: MachineInfo,
+        distro: impl Into<String>,
+    ) -> Self {
+        Self {
+            home,
+            save,
+            machine,
+            wsl_distro: Some(distro.into()),
         }
     }
 
@@ -135,7 +152,18 @@ impl ClaudeAdapter {
             return Ok(None);
         };
 
-        let (project_key, git_remote, detected_branch) = project_identity(Path::new(&cwd));
+        let (project_key_value, git_remote, detected_branch) =
+            if let Some(distro) = &self.wsl_distro {
+                let info = wsl_git_info(distro, &cwd);
+                let remote = info.remote.as_deref().and_then(normalize_git_remote);
+                (
+                    project_key(Path::new(&cwd), remote.as_deref()),
+                    remote,
+                    info.branch,
+                )
+            } else {
+                project_identity(Path::new(&cwd))
+            };
         let git_branch = git_branch.or(detected_branch);
         let created_at = created_at.unwrap_or_else(|| file_mtime(path));
         let updated_at = updated_at
@@ -172,7 +200,7 @@ impl ClaudeAdapter {
             created_at,
             updated_at,
             cwd,
-            project_key,
+            project_key: project_key_value,
             git_remote,
             git_branch,
             source,
@@ -185,6 +213,7 @@ impl ClaudeAdapter {
             size_bytes: content.len() as u64,
             source_path: None,
             parent_timeline: None,
+            wsl_distro: self.wsl_distro.clone(),
         };
 
         Ok(Some(SessionRecord {
@@ -325,6 +354,10 @@ impl AgentAdapter for ClaudeAdapter {
 
     fn resume_command(&self, native_id: &str) -> Vec<String> {
         vec!["claude".into(), "--resume".into(), native_id.to_string()]
+    }
+
+    fn wsl_distro(&self) -> Option<&str> {
+        self.wsl_distro.as_deref()
     }
 }
 

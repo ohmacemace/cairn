@@ -193,6 +193,31 @@ pub fn git_info(cwd: &Path) -> GitInfo {
     GitInfo { remote, branch }
 }
 
+/// Git info for a path inside a WSL distro. Only runs on Windows; on other
+/// platforms this returns an empty result and callers fall back to a local key.
+pub fn wsl_git_info(distro: &str, cwd: &str) -> GitInfo {
+    if !cfg!(windows) {
+        return GitInfo::default();
+    }
+
+    let run = |args: &[&str]| -> Option<String> {
+        Command::new("wsl.exe")
+            .args(["-d", distro, "--"])
+            .args(args)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    };
+
+    let remote = run(&["git", "-C", cwd, "remote", "get-url", "origin"]);
+    let branch = run(&["git", "-C", cwd, "rev-parse", "--abbrev-ref", "HEAD"])
+        .filter(|value| value != "HEAD");
+    GitInfo { remote, branch }
+}
+
 pub fn project_key(cwd: &Path, remote: Option<&str>) -> String {
     if let Some(normalized) = remote.and_then(normalize_git_remote) {
         return format!("git:{normalized}");

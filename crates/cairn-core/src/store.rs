@@ -234,6 +234,7 @@ mod tests {
             size_bytes: 3,
             source_path: None,
             parent_timeline: None,
+            wsl_distro: None,
         }
     }
 

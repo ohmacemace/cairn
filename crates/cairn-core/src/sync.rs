@@ -3,11 +3,12 @@ use std::path::Path;
 
 use crate::adapters::claude::ClaudeAdapter;
 use crate::adapters::codex::CodexAdapter;
+use crate::adapters::codex_file::CodexFileAdapter;
 use crate::adapters::AgentAdapter;
 use crate::config::{Config, SyncState};
 use crate::error::{Error, Result};
 use crate::git;
-use crate::model::{Agent, ImportOutcome, SessionMeta, SessionRecord};
+use crate::model::{Agent, ImportOutcome, MachineInfo, SessionMeta, SessionRecord};
 use crate::paths::now_ts;
 use crate::store::Store;
 
@@ -74,8 +75,35 @@ impl SyncEngine {
             out.push(Box::new(ClaudeAdapter::new(
                 self.config.claude_home(),
                 self.config.save.clone(),
-                machine,
+                machine.clone(),
             )));
+        }
+
+        for source in &self.config.wsl {
+            let wsl_machine = MachineInfo {
+                id: self.config.machine_id.clone(),
+                name: format!("{} (WSL: {})", self.config.machine_name, source.distro),
+            };
+            if self.config.agents.codex {
+                if let Some(home) = source.codex_home() {
+                    out.push(Box::new(CodexFileAdapter::new(
+                        home,
+                        self.config.save.clone(),
+                        wsl_machine.clone(),
+                        source.distro.clone(),
+                    )));
+                }
+            }
+            if self.config.agents.claude {
+                if let Some(home) = source.claude_home() {
+                    out.push(Box::new(ClaudeAdapter::new_wsl(
+                        home,
+                        self.config.save.clone(),
+                        wsl_machine,
+                        source.distro.clone(),
+                    )));
+                }
+            }
         }
 
         out
@@ -259,7 +287,8 @@ impl SyncEngine {
 
             let record = self.store.read_bundle(meta.agent, &meta.timeline_id)?;
             let target_cwd = self.config.resolve_cwd(&record.meta);
-            if !target_cwd.exists() {
+            let is_wsl = record.meta.wsl_distro.is_some();
+            if !is_wsl && !target_cwd.exists() {
                 if dry_run {
                     report.notes.push(format!(
                         "would restore {} {} into {} (directory will be created)",
@@ -273,7 +302,17 @@ impl SyncEngine {
                 std::fs::create_dir_all(&target_cwd)?;
             }
 
-            let adapter = self.adapter_for(record.meta.agent)?;
+            let adapter = match self.adapter_for_meta(&record.meta) {
+                Ok(adapter) => adapter,
+                Err(err) if is_wsl => {
+                    report.warnings.push(format!(
+                        "skipped WSL session {} ({}): {err}",
+                        record.meta.native_id, record.meta.agent
+                    ));
+                    continue;
+                }
+                Err(err) => return Err(err),
+            };
             if dry_run {
                 report.notes.push(format!(
                     "would restore {} {} into {}",
@@ -384,19 +423,33 @@ impl SyncEngine {
             });
         }
 
-        if !target_cwd.exists() {
+        if !record.meta.wsl_distro.is_some() && !target_cwd.exists() {
             std::fs::create_dir_all(&target_cwd)?;
         }
 
-        let adapter = self.adapter_for(record.meta.agent)?;
+        let adapter = self.adapter_for_meta(&record.meta)?;
         adapter.import(&record, &target_cwd)
     }
 
     pub fn adapter_for(&self, agent: Agent) -> Result<Box<dyn AgentAdapter>> {
         self.adapters()
             .into_iter()
-            .find(|a| a.agent() == agent)
+            .find(|a| a.agent() == agent && a.wsl_distro().is_none())
             .ok_or_else(|| Error::Config(format!("{agent} adapter is disabled")))
+    }
+
+    pub fn adapter_for_meta(&self, meta: &SessionMeta) -> Result<Box<dyn AgentAdapter>> {
+        let wanted = meta.wsl_distro.as_deref();
+        self.adapters()
+            .into_iter()
+            .find(|a| a.agent() == meta.agent && a.wsl_distro() == wanted)
+            .ok_or_else(|| match wanted {
+                Some(distro) => Error::Config(format!(
+                    "no {} adapter configured for WSL distro {distro}",
+                    meta.agent
+                )),
+                None => Error::Config(format!("{} adapter is disabled", meta.agent)),
+            })
     }
 
     pub fn resume_command(&self, agent: Agent, native_id: &str) -> Result<Vec<String>> {
