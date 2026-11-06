@@ -1,0 +1,10 @@
+[workspace]
+resolver = "2"
+members = ["crates/cairn-core", "crates/cairn-cli"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["mace"]
+repository = "https://github.com/ohmacemace/cairn"
