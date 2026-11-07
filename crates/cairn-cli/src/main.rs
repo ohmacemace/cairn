@@ -316,10 +316,13 @@ fn cmd_restore(
             .or(engine.store.find(Agent::Claude, &outcome.native_id)?)
             .ok_or_else(|| cairn_core::Error::NotFound(outcome.native_id.clone()))?;
         let cmd = engine.resume_command(meta.agent, &meta.native_id)?;
+        let target_dir = cwd
+            .clone()
+            .unwrap_or_else(|| engine.config.resolve_cwd(&meta));
         println!("running: {}", cmd.join(" "));
         let status = Command::new(&cmd[0])
             .args(&cmd[1..])
-            .current_dir(&outcome.path)
+            .current_dir(&target_dir)
             .status()?;
         if !status.success() {
             return Err(cairn_core::Error::Adapter(format!(
