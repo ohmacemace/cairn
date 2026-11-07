@@ -37,6 +37,9 @@ pub struct PushReport {
 
 #[derive(Debug, Default)]
 pub struct PullReport {
+    /// Number of bundles visible in the store after refreshing metadata.
+    pub remote: usize,
+    /// Only set by `restore_all`, never by `pull`.
     pub imported: usize,
     pub skipped: usize,
     pub conflicts: Vec<String>,
@@ -126,6 +129,19 @@ impl SyncEngine {
                     .push(format!("{} adapter unavailable: {err}", adapter.agent())),
             }
         }
+
+        // Apply the local timeline mapping before anything compares keys.
+        // Without it, a forked session keeps looking like its parent.
+        let state = SyncState::load(&Config::state_path()).unwrap_or_default();
+        for record in &mut report.records {
+            let key = SyncState::native_key(record.meta.agent, &record.meta.native_id);
+            if let Some(timeline_id) = state.local_timelines.get(&key) {
+                if self.store.has_bundle(record.meta.agent, timeline_id) {
+                    record.meta.timeline_id = timeline_id.clone();
+                }
+            }
+        }
+
         report
             .records
             .sort_by_key(|a| std::cmp::Reverse(a.meta.updated_at));
@@ -207,7 +223,7 @@ impl SyncEngine {
         let state_path = Config::state_path();
         let mut state = SyncState::load(&state_path)?;
 
-        for record in scan.records {
+        for mut record in scan.records {
             let key = SyncState::key(record.meta.agent, &record.meta.timeline_id);
             let known = state.timelines.get(&key).cloned();
 
@@ -249,6 +265,7 @@ impl SyncEngine {
                     if both_changed {
                         let mut fork = record.clone();
                         let new_timeline = uuid::Uuid::new_v4().to_string();
+                        preserve_store_meta(&mut fork, remote_meta);
                         fork.meta.timeline_id = new_timeline.clone();
                         fork.meta.parent_timeline = Some(remote_meta.timeline_id.clone());
                         fork.meta.family_id = remote_meta.family_id.clone();
@@ -274,6 +291,10 @@ impl SyncEngine {
                         if !dry_run {
                             self.store.write_bundle(&fork)?;
                         }
+                        state.local_timelines.insert(
+                            SyncState::native_key(record.meta.agent, &record.meta.native_id),
+                            new_timeline.clone(),
+                        );
                         report.conflicts.push(format!(
                             "{} {} diverged; saved local timeline {}",
                             record.meta.agent, record.meta.native_id, new_timeline
@@ -287,6 +308,7 @@ impl SyncEngine {
                             },
                         );
                     } else {
+                        preserve_store_meta(&mut record, remote_meta);
                         if !dry_run {
                             self.store.write_bundle(&record)?;
                         }
@@ -318,7 +340,26 @@ impl SyncEngine {
         Ok(report)
     }
 
+    /// Refresh store metadata only. Sessions are materialized one at a time
+    /// with `restore` / `restore_timeline`.
     pub fn pull(&self, dry_run: bool) -> Result<PullReport> {
+        if !dry_run {
+            git::pull(&self.store.root, &self.config.store.branch)?;
+        }
+        let mut report = PullReport {
+            remote: self.store.list_bundles()?.len(),
+            ..Default::default()
+        };
+        report.notes.push(format!(
+            "会话仓库已刷新：{} 条会话。恢复请按会话单独操作。",
+            report.remote
+        ));
+        Ok(report)
+    }
+
+    /// Materialize every stored session. Kept for explicit maintenance use;
+    /// the normal sync path never calls this.
+    pub fn restore_all(&self, dry_run: bool) -> Result<PullReport> {
         git::pull(&self.store.root, &self.config.store.branch)?;
 
         let mut report = PullReport::default();
@@ -334,6 +375,7 @@ impl SyncEngine {
         let state_path = Config::state_path();
         let mut state = SyncState::load(&state_path)?;
         let remote_bundles = self.store.list_bundles()?;
+        report.remote = remote_bundles.len();
 
         for meta in &remote_bundles {
             let key = SyncState::key(meta.agent, &meta.timeline_id);
@@ -545,24 +587,56 @@ impl SyncEngine {
         }
 
         // A fork keeps the parent's native id in the store. It cannot be
-        // materialized next to the parent on the same machine without
-        // overwriting it, so refuse instead of silently replacing data.
-        if !record.content.is_empty() && record.meta.timeline_id != record.meta.native_id {
-            let scan = self.scan()?;
-            if let Some(local) = scan.records.iter().find(|local| {
-                local.meta.agent == agent && local.meta.native_id == record.meta.native_id
-            }) {
-                if local.meta.content_hash != record.meta.content_hash {
-                    return Err(Error::Config(format!(
-                        "原生会话 {} 已被本机另一条时间线占用。请先备份或移除本机会话，再恢复这条分叉。",
-                        record.meta.native_id
-                    )));
+        // materialized next to another timeline that already owns that native
+        // id on this machine without overwriting it.
+        if !record.content.is_empty() {
+            let sibling_in_store = self.store.list_bundles()?.iter().any(|meta| {
+                meta.agent == agent
+                    && meta.native_id == record.meta.native_id
+                    && meta.timeline_id != record.meta.timeline_id
+            });
+            if sibling_in_store {
+                let scan = self.scan()?;
+                if let Some(local) = scan.records.iter().find(|local| {
+                    local.meta.agent == agent && local.meta.native_id == record.meta.native_id
+                }) {
+                    if local.meta.content_hash != record.meta.content_hash
+                        && local.meta.timeline_id != record.meta.timeline_id
+                    {
+                        return Err(Error::Config(format!(
+                            "原生会话 {} 已被本机另一条时间线占用。请先备份或移除本机会话，再恢复这条时间线。",
+                            record.meta.native_id
+                        )));
+                    }
                 }
             }
         }
 
         let adapter = self.adapter_for_meta(&record.meta)?;
-        adapter.import(&record, &target_cwd)
+        let outcome = adapter.import(&record, &target_cwd)?;
+
+        // Record the restore so a later local append can be recognized as
+        // divergence instead of overwriting the store copy. Forks also need a
+        // local native-id mapping so scans keep them separate from the parent.
+        let state_path = Config::state_path();
+        let mut state = SyncState::load(&state_path)?;
+        if record.meta.timeline_id != record.meta.native_id {
+            state.local_timelines.insert(
+                SyncState::native_key(agent, &record.meta.native_id),
+                record.meta.timeline_id.clone(),
+            );
+        }
+        state.timelines.insert(
+            SyncState::key(agent, &record.meta.timeline_id),
+            crate::config::TimelineState {
+                store_hash: record.meta.content_hash.clone(),
+                local_hash: record.meta.content_hash.clone(),
+                synced_at: now_ts(),
+            },
+        );
+        state.save(&state_path)?;
+
+        Ok(outcome)
     }
 
     pub fn adapter_for(&self, agent: Agent) -> Result<Box<dyn AgentAdapter>> {
@@ -588,5 +662,23 @@ impl SyncEngine {
 
     pub fn resume_command(&self, agent: Agent, native_id: &str) -> Result<Vec<String>> {
         Ok(self.adapter_for(agent)?.resume_command(native_id))
+    }
+}
+
+/// Local adapters do not know about store-only metadata. Preserve it when a
+/// locally changed session is written back.
+fn preserve_store_meta(record: &mut SessionRecord, remote: &SessionMeta) {
+    if record.meta.parent_timeline.is_none() {
+        record.meta.parent_timeline = remote.parent_timeline.clone();
+    }
+    if record.meta.fork_point.is_none() {
+        record.meta.fork_point = remote.fork_point.clone();
+    }
+    if record.meta.merged_from.is_empty() {
+        record.meta.merged_from = remote.merged_from.clone();
+    }
+    record.meta.archived |= remote.archived;
+    if !remote.merged_from.is_empty() {
+        record.meta.title = remote.title.clone();
     }
 }

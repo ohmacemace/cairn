@@ -146,13 +146,6 @@ fn first_session(env: &TestEnv) -> Value {
     value.as_array().unwrap()[0].clone()
 }
 
-fn assert_status_clean(env: &TestEnv, home: &Path) {
-    let out = run_args_with_claude(env, home, &["status", "--json"]);
-    let status: Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(status["pending_push"].as_array().unwrap().len(), 0);
-    assert_eq!(status["pending_pull"].as_array().unwrap().len(), 0);
-}
-
 fn append_claude_turn(home: &Path, cwd: &Path, id: &str, text: &str) {
     let path = home
         .join("projects")
@@ -212,7 +205,10 @@ fn claude_push_pull_restore_round_trip() {
     assert!(bundle.join("session.jsonl.gz").exists());
 
     run_args_with_claude(&env, &env.claude_b, &["pull"]);
-    assert_status_clean(&env, &env.claude_b);
+    assert!(
+        !env.claude_b.join("projects").exists(),
+        "pull should not materialize sessions"
+    );
 
     let project_b = env.root.join("project-b");
     fs::create_dir_all(&project_b).unwrap();
@@ -277,8 +273,18 @@ fn crlf_session_round_trip() {
     assert_eq!(session["title"].as_str().unwrap(), "Fix the build");
 
     run_args(&env, &["push"]);
-    run_args_with_claude(&env, &env.claude_b, &["pull"]);
-    assert_status_clean(&env, &env.claude_b);
+    run_args_with_claude(
+        &env,
+        &env.claude_b,
+        &[
+            "restore",
+            id,
+            "--agent",
+            "claude",
+            "--cwd",
+            project.to_str().unwrap(),
+        ],
+    );
 
     let restored = env
         .claude_b
@@ -327,9 +333,16 @@ fn divergent_push_creates_fork_with_point() {
     ]);
     run(&mut init_b);
 
-    let mut pull_b = env.command_for(&config_b, &state_b, &claude_b);
-    pull_b.arg("pull");
-    run(&mut pull_b);
+    let mut restore_b = env.command_for(&config_b, &state_b, &claude_b);
+    restore_b.args([
+        "restore",
+        id,
+        "--agent",
+        "claude",
+        "--cwd",
+        project.to_str().unwrap(),
+    ]);
+    run(&mut restore_b);
 
     append_claude_turn(&env.claude_a, &project, id, "change from A");
     append_claude_turn(&claude_b, &project, id, "change from B");
@@ -369,6 +382,49 @@ fn divergent_push_creates_fork_with_point() {
     assert!(point["byte"].as_u64().unwrap() > 0);
     assert!(point["hash"].as_str().unwrap().starts_with("sha256:"));
     assert_eq!(point["parentTimeline"].as_str().unwrap(), id);
+
+    // The local machine must remember that its native session now belongs to
+    // the fork, otherwise the next push would fork again forever.
+    let mut status_b = env.command_for(&config_b, &state_b, &claude_b);
+    status_b.args(["status", "--json"]);
+    let out = run(&mut status_b);
+    let status: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(status["pending_push"].as_array().unwrap().len(), 0);
+    assert!(status["pending_pull"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|key| key.as_str() == Some(format!("claude/{id}").as_str())));
+
+    append_claude_turn(&claude_b, &project, id, "change from B again");
+    let mut push_b_again = env.command_for(&config_b, &state_b, &claude_b);
+    push_b_again.arg("push");
+    run(&mut push_b_again);
+    let mut fork_meta_after: Option<Value> = None;
+    let fork_count = fs::read_dir(&claude_dir)
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.path().join("meta.json").exists())
+        .filter(|entry| {
+            let meta = fs::read(entry.path().join("meta.json"))
+                .ok()
+                .and_then(|raw| serde_json::from_slice::<Value>(&raw).ok());
+            let is_fork = meta
+                .as_ref()
+                .map(|meta| meta["parent_timeline"].as_str() == Some(id))
+                .unwrap_or(false);
+            if is_fork {
+                fork_meta_after = meta;
+            }
+            is_fork
+        })
+        .count();
+    assert_eq!(fork_count, 1, "second push created another fork");
+    let fork_meta_after = fork_meta_after.expect("fork bundle disappeared");
+    assert!(
+        fork_meta_after["fork_point"]["hash"].as_str().is_some(),
+        "updating a fork must keep its fork point"
+    );
 }
 
 #[test]
@@ -471,7 +527,10 @@ fn wsl_file_level_round_trip() {
         .exists());
 
     run_args_with_claude(&env, &env.claude_b, &["pull"]);
-    assert_status_clean(&env, &env.claude_b);
+    assert!(
+        !env.claude_b.join("projects").exists(),
+        "pull should not materialize sessions"
+    );
 
     run_args(
         &env,

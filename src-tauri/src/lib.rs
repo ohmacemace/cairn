@@ -123,6 +123,7 @@ struct PushView {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PullView {
+    remote: usize,
     imported: usize,
     skipped: usize,
     conflicts: Vec<String>,
@@ -431,6 +432,7 @@ async fn pull_store() -> Result<PullView, String> {
         let engine = SyncEngine::new(config).map_err(err)?;
         let report = engine.pull(false).map_err(err)?;
         Ok(PullView {
+            remote: report.remote,
             imported: report.imported,
             skipped: report.skipped,
             conflicts: report.conflicts,

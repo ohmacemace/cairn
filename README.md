@@ -70,6 +70,10 @@ cairn restore <session-id> --cwd ~/code/project
 
 `restore --open` runs the native resume command after restoring.
 
+`cairn pull` only refreshes the session store metadata. Session files are
+materialized one at a time by `cairn restore` or from the desktop app, so a
+large store never rewrites every agent session on every sync.
+
 ## Timelines and merge
 
 Session files are append-only. When two machines continue the same session, the first push keeps the original timeline and the later push is stored as a fork. Cairn records the fork point (line, byte offset, prefix hash) at the moment divergence is detected, so later operations do not have to rescan the whole history. Session JSONL is never text-merged by Git.

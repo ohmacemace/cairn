@@ -279,7 +279,7 @@ function Workspace({
         const result = await pullStore();
         setToast({
           kind: "ok",
-          text: `已拉取：恢复 ${result.imported}，跳过 ${result.skipped}`,
+          text: `会话仓库已刷新：${result.remote} 条会话。恢复请按会话单独操作。`,
         });
       }
       await refresh(false);

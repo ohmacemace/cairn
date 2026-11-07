@@ -179,8 +179,9 @@ export async function pushStore(): Promise<PushResult> {
 export async function pullStore(): Promise<PullResult> {
   if (!isTauri) {
     return {
+      remote: mockSessions.length,
       imported: 0,
-      skipped: mockSessions.length,
+      skipped: 0,
       conflicts: [],
       warnings: [],
       notes: [],

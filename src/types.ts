@@ -93,6 +93,7 @@ export interface PushResult {
 }
 
 export interface PullResult {
+  remote: number;
   imported: number;
   skipped: number;
   conflicts: string[];

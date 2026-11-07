@@ -272,17 +272,13 @@ fn cmd_pull(dry_run: bool) -> cairn_core::Result<()> {
     for warning in &report.warnings {
         eprintln!("warning: {warning}");
     }
-    for conflict in &report.conflicts {
-        eprintln!("conflict: {conflict}");
-    }
     for note in &report.notes {
         println!("{note}");
     }
     println!(
-        "{}imported {}, skipped {}",
+        "{}store sessions: {}",
         if dry_run { "[dry-run] " } else { "" },
-        report.imported,
-        report.skipped
+        report.remote
     );
     Ok(())
 }

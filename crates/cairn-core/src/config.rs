@@ -267,6 +267,10 @@ pub struct SyncState {
     pub schema: u32,
     #[serde(default)]
     pub timelines: BTreeMap<String, TimelineState>,
+    /// Local-only mapping from a native session id to the timeline that owns
+    /// it on this machine. Needed when two timelines share one native id.
+    #[serde(default)]
+    pub local_timelines: BTreeMap<String, String>,
 }
 
 impl Default for SyncState {
@@ -274,6 +278,7 @@ impl Default for SyncState {
         Self {
             schema: 1,
             timelines: BTreeMap::new(),
+            local_timelines: BTreeMap::new(),
         }
     }
 }
@@ -298,6 +303,10 @@ impl SyncState {
 
     pub fn key(agent: impl std::fmt::Display, timeline_id: &str) -> String {
         format!("{agent}/{timeline_id}")
+    }
+
+    pub fn native_key(agent: impl std::fmt::Display, native_id: &str) -> String {
+        format!("{agent}:{native_id}")
     }
 }
 
