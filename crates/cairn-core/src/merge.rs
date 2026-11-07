@@ -1157,24 +1157,25 @@ pub fn create_merged_session(
         fork_point: None,
         wsl_distro: record_a.meta.wsl_distro.clone(),
     };
-    let mut record = SessionRecord::new(meta, local_content);
+    let record = SessionRecord::new(meta, local_content);
+
+    // Publish the merged timeline before writing the local file. The store
+    // keeps the canonical form that `discover` produces on the next scan,
+    // while the local file keeps the full resumable transcript.
+    let mut store_record = record.clone();
+    store_record.content = bundle_content;
+    engine.store.write_bundle(&store_record)?;
 
     let adapter = engine.adapter_for_meta(&record.meta)?;
     let outcome = adapter.import(&record, target_cwd)?;
-    // The store keeps the same canonical form that `discover` produces on the
-    // next scan, otherwise the first push would report a false change.
-    record.content = bundle_content;
-    engine.store.write_bundle(&record)?;
 
-    let archived_a = archive_timeline(&engine.store, agent, timeline_a)?;
-    let archived_b = archive_timeline(&engine.store, agent, timeline_b)?;
-    if archived_a || archived_b {
-        let message = format!(
-            "cairn: merge {timeline_a} + {timeline_b} into {native_id} on {}",
-            engine.config.machine_name
-        );
-        let _ = crate::git::commit_all(&engine.store.root, &message)?;
-    }
+    let _ = archive_timeline(&engine.store, agent, timeline_a)?;
+    let _ = archive_timeline(&engine.store, agent, timeline_b)?;
+    let message = format!(
+        "cairn: merge {timeline_a} + {timeline_b} into {native_id} on {}",
+        engine.config.machine_name
+    );
+    let _ = crate::git::commit_all(&engine.store.root, &message)?;
 
     Ok(MergedSession {
         meta: record.meta,

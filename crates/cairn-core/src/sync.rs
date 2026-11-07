@@ -476,8 +476,10 @@ impl SyncEngine {
 
         // A fork shares its native id with the parent. If that id is already
         // owned by another timeline on this machine, materialize the fork
-        // under a fresh native id and keep it as a new local timeline.
+        // under a fresh native id and keep it as a new local timeline. Reuse
+        // an existing copy of the same fork when one is already in the store.
         let mut copied = false;
+        let mut created_copy = false;
         if !record.content.is_empty() {
             let sibling_in_store = self.store.list_bundles()?.iter().any(|meta| {
                 meta.agent == agent
@@ -492,7 +494,22 @@ impl SyncEngine {
                     if local.meta.content_hash != record.meta.content_hash
                         && local.meta.timeline_id != record.meta.timeline_id
                     {
-                        record = copy_as_new_timeline(&record, &self.config);
+                        let existing_copy = self.store.list_bundles()?.into_iter().find(|meta| {
+                            meta.agent == agent
+                                && meta.family_id == record.meta.family_id
+                                && meta.parent_timeline.as_deref()
+                                    == Some(record.meta.timeline_id.as_str())
+                                && meta.native_id != record.meta.native_id
+                        });
+                        match existing_copy {
+                            Some(meta) => {
+                                record = self.store.read_bundle(agent, &meta.timeline_id)?;
+                            }
+                            None => {
+                                record = copy_as_new_timeline(&record, &self.config);
+                                created_copy = true;
+                            }
+                        }
                         copied = true;
                     }
                 }
@@ -500,8 +517,9 @@ impl SyncEngine {
         }
 
         let adapter = self.adapter_for_meta(&record.meta)?;
-        let mut outcome = adapter.import(&record, &target_cwd)?;
-        if copied {
+        if created_copy {
+            // Publish the new timeline before writing the local file. If the
+            // import fails, the copy is still in the store and can be retried.
             self.store.write_bundle(&record)?;
             let message = format!(
                 "cairn: restore {} as new timeline {} on {}",
@@ -510,8 +528,11 @@ impl SyncEngine {
                 self.config.machine_name
             );
             let _ = crate::git::commit_all(&self.store.root, &message)?;
+        }
+        let mut outcome = adapter.import(&record, &target_cwd)?;
+        if copied {
             let note = format!(
-                "本机原生 ID 已被另一条时间线占用，已分配新的原生 ID {} 并保存为新时间线",
+                "本机原生 ID 已被另一条时间线占用，已使用新的原生 ID {}",
                 record.meta.native_id
             );
             outcome.note = Some(match outcome.note {
