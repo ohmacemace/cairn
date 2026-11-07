@@ -180,9 +180,6 @@ export async function pullStore(): Promise<PullResult> {
   if (!isTauri) {
     return {
       remote: mockSessions.length,
-      imported: 0,
-      skipped: 0,
-      conflicts: [],
       warnings: [],
       notes: [],
     };
