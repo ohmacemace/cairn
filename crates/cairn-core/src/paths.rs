@@ -232,29 +232,150 @@ pub fn project_key(cwd: &Path, remote: Option<&str>) -> String {
     )
 }
 
+/// Maximum length of a Claude Code project directory name before it is
+/// truncated and suffixed with a hash.
+const CLAUDE_PROJECT_DIR_MAX_LEN: usize = 200;
+
 /// Claude Code stores sessions under ~/.claude/projects/<encoded-cwd>/.
-/// Observed encoding: replace path separators with '-'.
+///
+/// The encoding mirrors Claude Code's own CLI (verified against a 2.1.x
+/// install): every UTF-16 code unit outside `[A-Za-z0-9]` becomes `-`. When the
+/// result exceeds 200 code units it is truncated to 200 and suffixed with `-`
+/// plus the base36 absolute value of the path's 32-bit Java-style string hash.
 pub fn encode_claude_project_dir(cwd: &Path) -> String {
-    let raw = cwd.to_string_lossy();
-    let raw = raw.trim_end_matches(['/', '\\']);
-    raw.replace(['/', '\\', ':'], "-")
+    let units = path_utf16_units(cwd);
+    let mut out = String::with_capacity(units.len());
+    for unit in &units {
+        let code = u32::from(*unit);
+        let is_alnum = (u32::from(b'0')..=u32::from(b'9')).contains(&code)
+            || (u32::from(b'A')..=u32::from(b'Z')).contains(&code)
+            || (u32::from(b'a')..=u32::from(b'z')).contains(&code);
+        out.push(if is_alnum {
+            char::from_u32(code).expect("ascii code point")
+        } else {
+            '-'
+        });
+    }
+
+    if out.len() <= CLAUDE_PROJECT_DIR_MAX_LEN {
+        return out;
+    }
+
+    let suffix = base36(u64::from(java_string_hash(&units).unsigned_abs()));
+    format!("{}-{suffix}", &out[..CLAUDE_PROJECT_DIR_MAX_LEN])
+}
+
+fn path_utf16_units(path: &Path) -> Vec<u16> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        path.as_os_str().encode_wide().collect()
+    }
+    #[cfg(not(windows))]
+    {
+        path.to_string_lossy().encode_utf16().collect()
+    }
+}
+
+/// Java's `String.hashCode` over UTF-16 code units, which is what Claude Code
+/// uses to disambiguate truncated directory names.
+fn java_string_hash(units: &[u16]) -> i32 {
+    let mut hash: i32 = 0;
+    for unit in units {
+        hash = hash.wrapping_mul(31).wrapping_add(i32::from(*unit));
+    }
+    hash
+}
+
+fn base36(mut value: u64) -> String {
+    const DIGITS: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
+    if value == 0 {
+        return "0".to_string();
+    }
+    let mut buf = Vec::new();
+    while value > 0 {
+        buf.push(DIGITS[(value % 36) as usize]);
+        value /= 36;
+    }
+    buf.reverse();
+    String::from_utf8(buf).expect("base36 digits are ascii")
+}
+
+/// Resolve a cwd the way Claude Code does before deriving its project
+/// directory: canonicalize symlinks and strip the Windows verbatim prefix that
+/// `std::fs::canonicalize` adds (`\\?\C:\...`).
+fn resolve_claude_cwd(cwd: &Path) -> PathBuf {
+    match std::fs::canonicalize(cwd) {
+        Ok(path) => strip_verbatim_prefix(path),
+        Err(_) => trim_trailing_separators(cwd),
+    }
+}
+
+#[cfg(windows)]
+fn strip_verbatim_prefix(path: PathBuf) -> PathBuf {
+    let text = path.to_string_lossy().into_owned();
+    if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!(r"\\{rest}"));
+    }
+    if let Some(rest) = text.strip_prefix(r"\\?\") {
+        return PathBuf::from(rest);
+    }
+    path
+}
+
+#[cfg(not(windows))]
+fn strip_verbatim_prefix(path: PathBuf) -> PathBuf {
+    path
+}
+
+fn trim_trailing_separators(path: &Path) -> PathBuf {
+    let text = path.to_string_lossy();
+    let bytes = text.as_bytes();
+    let is_root = text == "/"
+        || text == "//"
+        || (bytes.len() == 3 && bytes[1] == b':' && (bytes[2] == b'/' || bytes[2] == b'\\'));
+    if is_root {
+        return path.to_path_buf();
+    }
+    let trimmed = text.trim_end_matches(['/', '\\']);
+    if trimmed.is_empty() {
+        path.to_path_buf()
+    } else {
+        PathBuf::from(trimmed)
+    }
+}
+
+/// Project directory name Claude Code derives for this working directory.
+pub fn claude_project_dir_name(cwd: &Path) -> String {
+    encode_claude_project_dir(&resolve_claude_cwd(cwd))
 }
 
 /// Reuse an existing Claude project directory if one already maps to this cwd.
+///
+/// Claude Code's primary lookup is the computed directory, so an existing
+/// computed directory wins. Otherwise scan existing project directories for a
+/// session whose recorded cwd maps to the same path; this covers symlinks,
+/// case differences, and older directory names. Fall back to the computed name.
 pub fn claude_project_dir_for(home: &Path, cwd: &Path) -> PathBuf {
+    let resolved = resolve_claude_cwd(cwd);
     let projects = home.join("projects");
+    let computed = projects.join(encode_claude_project_dir(&resolved));
+    if computed.is_dir() {
+        return computed;
+    }
+
     if let Ok(entries) = std::fs::read_dir(&projects) {
         for entry in entries.flatten() {
             let path = entry.path();
             if !path.is_dir() {
                 continue;
             }
-            if dir_contains_cwd(&path, cwd) {
+            if dir_contains_cwd(&path, &resolved) {
                 return path;
             }
         }
     }
-    projects.join(encode_claude_project_dir(cwd))
+    computed
 }
 
 fn dir_contains_cwd(dir: &Path, cwd: &Path) -> bool {
@@ -267,19 +388,34 @@ fn dir_contains_cwd(dir: &Path, cwd: &Path) -> bool {
         if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
             continue;
         }
-        if let Ok(file) = std::fs::File::open(&path) {
-            let mut reader = BufReader::new(file);
-            let mut line = String::new();
-            if reader.read_line(&mut line).is_ok() {
-                let line = line.trim_end_matches(['\r', '\n']);
-                if let Ok(value) = serde_json::from_str::<Value>(line) {
-                    if let Some(session_cwd) = value.get("cwd").and_then(Value::as_str) {
-                        if paths_equivalent(session_cwd, &target) {
-                            return true;
-                        }
-                    }
-                }
-            }
+        if session_file_matches_cwd(&path, &target) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Compare against the first cwd recorded in the session file, which is the cwd
+/// Claude Code used to pick the project directory. Some session files start
+/// with summary lines that have no cwd, so look a few lines ahead.
+fn session_file_matches_cwd(path: &Path, target: &str) -> bool {
+    const MAX_HEAD_LINES: usize = 20;
+    let Ok(file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let reader = BufReader::new(file);
+    for line in reader.lines().take(MAX_HEAD_LINES) {
+        let Ok(line) = line else {
+            return false;
+        };
+        if line.trim().is_empty() {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        if let Some(session_cwd) = value.get("cwd").and_then(Value::as_str) {
+            return paths_equivalent(session_cwd, target);
         }
     }
     false
@@ -514,6 +650,122 @@ mod tests {
         let value: Value = serde_json::from_slice(&out).unwrap();
         assert_eq!(value["cwd"], "/work/proj2");
         assert_eq!(value["text"], "/work/proj2");
+    }
+
+    #[test]
+    fn claude_project_dir_matches_claude_code_encoding() {
+        let cases: &[(&str, &str)] = &[
+            ("D:\\code\\cairn", "D--code-cairn"),
+            ("D:\\work\\demo-project", "D--work-demo-project"),
+            (
+                "C:\\Users\\demo\\.claude\\plugins\\marketplaces\\some-plugin\\scripts",
+                "C--Users-demo--claude-plugins-marketplaces-some-plugin-scripts",
+            ),
+            ("/Users/demo/my_proj", "-Users-demo-my-proj"),
+            (
+                "/Users/demo/.config/my project",
+                "-Users-demo--config-my-project",
+            ),
+            ("C:\\", "C--"),
+            ("D:\\a\\b c\\d_e.f", "D--a-b-c-d-e-f"),
+            ("C:\\Users\\\u{1F600}\\proj", "C--Users----proj"),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(
+                encode_claude_project_dir(Path::new(input)),
+                *expected,
+                "input {input:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn claude_project_dir_truncates_long_encoded_names() {
+        let mut raw = String::from("C:\\Users\\demo\\");
+        for _ in 0..20 {
+            raw.push_str("deep folder\\");
+        }
+        raw.push_str("my_project");
+        assert_eq!(raw.len(), 264);
+
+        let encoded = encode_claude_project_dir(Path::new(&raw));
+        assert_eq!(
+            encoded,
+            "C--Users-demo-deep-folder-deep-folder-deep-folder-deep-folder-deep-folder-deep-folder-deep-folder-deep-folder-deep-folder-deep-folder-deep-folder-deep-folder-deep-folder-deep-folder-deep-folder-deep-f-4yl7gy"
+        );
+        assert_eq!(encoded.len(), 207);
+    }
+
+    fn write_claude_session(dir: &Path, name: &str, cwd: &Path) {
+        std::fs::create_dir_all(dir).unwrap();
+        let value = serde_json::json!({ "sessionId": name, "cwd": cwd.to_string_lossy() });
+        std::fs::write(dir.join(format!("{name}.jsonl")), format!("{value}\n")).unwrap();
+    }
+
+    #[test]
+    fn claude_project_dir_prefers_existing_computed_dir() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("claude");
+        let cwd = temp.path().join("work");
+        std::fs::create_dir_all(&cwd).unwrap();
+
+        let resolved = resolve_claude_cwd(&cwd);
+        let computed = home
+            .join("projects")
+            .join(encode_claude_project_dir(&resolved));
+        std::fs::create_dir_all(&computed).unwrap();
+        write_claude_session(&home.join("projects").join("legacy"), "abc", &resolved);
+
+        assert_eq!(claude_project_dir_for(&home, &cwd), computed);
+    }
+
+    #[test]
+    fn claude_project_dir_reuses_existing_dir_with_matching_cwd() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("claude");
+        let cwd = temp.path().join("work");
+        std::fs::create_dir_all(&cwd).unwrap();
+
+        let resolved = resolve_claude_cwd(&cwd);
+        let legacy = home.join("projects").join("legacy-name");
+        write_claude_session(&legacy, "abc", &resolved);
+
+        assert_eq!(claude_project_dir_for(&home, &cwd), legacy);
+    }
+
+    #[test]
+    fn claude_project_dir_scans_past_lines_without_cwd() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("claude");
+        let cwd = temp.path().join("work");
+        std::fs::create_dir_all(&cwd).unwrap();
+
+        let resolved = resolve_claude_cwd(&cwd);
+        let legacy = home.join("projects").join("legacy-name");
+        std::fs::create_dir_all(&legacy).unwrap();
+        let session = serde_json::json!({ "cwd": resolved.to_string_lossy() });
+        std::fs::write(
+            legacy.join("abc.jsonl"),
+            format!("{{\"type\":\"summary\"}}\n{session}\n"),
+        )
+        .unwrap();
+
+        assert_eq!(claude_project_dir_for(&home, &cwd), legacy);
+    }
+
+    #[test]
+    fn claude_project_dir_falls_back_to_encoded_name() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("claude");
+        let cwd = temp.path().join("work");
+        std::fs::create_dir_all(&cwd).unwrap();
+
+        let resolved = resolve_claude_cwd(&cwd);
+        let expected = home
+            .join("projects")
+            .join(encode_claude_project_dir(&resolved));
+
+        assert_eq!(claude_project_dir_for(&home, &cwd), expected);
     }
 
     #[test]

@@ -80,9 +80,7 @@ fn run_args_with_claude(env: &TestEnv, home: &Path, args: &[&str]) -> Output {
 }
 
 fn encode(cwd: &Path) -> String {
-    let raw = cwd.to_string_lossy();
-    raw.trim_end_matches(['/', '\\'])
-        .replace(['/', '\\', ':'], "-")
+    cairn_core::paths::claude_project_dir_name(cwd)
 }
 
 fn toml_path(path: &Path) -> String {

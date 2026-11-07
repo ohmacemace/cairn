@@ -111,6 +111,28 @@ local prefix no longer matches, that session is rebuilt from scratch. Codex
 rollouts are still stored in full (no trimming) until trimming is validated
 against live resumes.
 
+## Claude Code project directories
+
+Claude Code stores sessions under `~/.claude/projects/<encoded-cwd>/`. Cairn
+derives the same name so restored sessions appear under the original project:
+
+1. Canonicalize the target cwd (`realpath`; symlinks resolved).
+2. Replace every UTF-16 code unit outside `[A-Za-z0-9]` with `-`.
+3. If the result is longer than 200 code units, keep the first 200 and append
+   `-` plus the base36 absolute value of the path's Java-style 32-bit string
+   hash (for example `...-8yd8fv`).
+
+Cairn first reuses an existing project directory whose recorded session cwd
+maps to the target, then falls back to the computed name. The reuse path covers
+symlinked or case-different cwds and directory names written by older encodings.
+
+Interactive `claude --resume <id>` scans every project directory when the
+computed one has no match, so it can still find a session placed under an
+unexpected directory. Print mode (`claude -p --resume <id>`) only checks the
+computed directory for the current cwd and Git worktrees. If Claude Code ever
+changes this scheme, a restored session can be grouped under the wrong project
+and print-mode resume will not find it; update the encoding here to match.
+
 ## WSL (file-level)
 
 On Windows, Cairn can read and restore sessions inside WSL through the
