@@ -891,12 +891,13 @@ fn run_codex(
     prompt: &str,
     timeout: Duration,
 ) -> Result<(String, String)> {
+    let codex_bin = std::env::var("CAIRN_CODEX_BIN").unwrap_or_else(|_| "codex".to_string());
     let mut command = if let Some(distro) = wsl_distro {
         let mut command = Command::new("wsl.exe");
         command.args(["-d", distro, "--cd", "/tmp", "--", "codex"]);
         command
     } else {
-        let mut command = Command::new("codex");
+        let mut command = Command::new(&codex_bin);
         command.current_dir(temp);
         command
     };
@@ -921,8 +922,12 @@ fn run_codex(
     }
 
     let out = run_with_timeout(command, prompt, timeout, "codex")?;
-    let brief = if wsl_distro.is_some() {
-        read_wsl_file(wsl_distro.unwrap_or_default(), &output_path).unwrap_or_default()
+    let brief = if let Some(distro) = wsl_distro {
+        let text = read_wsl_file(distro, &output_path).unwrap_or_default();
+        let _ = Command::new("wsl.exe")
+            .args(["-d", distro, "--", "rm", "-f", &output_path])
+            .output();
+        text
     } else {
         std::fs::read_to_string(&output_path).unwrap_or_default()
     };

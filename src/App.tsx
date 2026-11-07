@@ -1069,7 +1069,7 @@ function MergeModal({
 
             <p className="muted merge-note">
               创建后会生成一个新的原生会话，简报作为第一条消息。原来的两条时间线会归档，
-              但不会删除；代码冲突仍需回项目仓库用 Git 处理。
+              但不会删除；代码冲突仍需在你自己的项目里用 Git 处理。
             </p>
 
             <button
