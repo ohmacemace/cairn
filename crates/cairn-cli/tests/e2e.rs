@@ -45,6 +45,15 @@ impl TestEnv {
         cmd.env("CAIRN_CLAUDE_HOME", home);
         cmd
     }
+
+    fn command_for(&self, config: &Path, state: &Path, claude_home: &Path) -> Command {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_cairn"));
+        cmd.env("CAIRN_CONFIG", config)
+            .env("CAIRN_STATE", state)
+            .env("CAIRN_CLAUDE_HOME", claude_home)
+            .env("CAIRN_CODEX_HOME", &self.codex);
+        cmd
+    }
 }
 
 fn run(cmd: &mut Command) -> Output {
@@ -142,6 +151,36 @@ fn assert_status_clean(env: &TestEnv, home: &Path) {
     let status: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(status["pending_push"].as_array().unwrap().len(), 0);
     assert_eq!(status["pending_pull"].as_array().unwrap().len(), 0);
+}
+
+fn append_claude_turn(home: &Path, cwd: &Path, id: &str, text: &str) {
+    let path = home
+        .join("projects")
+        .join(encode(cwd))
+        .join(format!("{id}.jsonl"));
+    let mut raw = fs::read_to_string(&path).unwrap();
+    let cwd = cwd.to_string_lossy().to_string();
+    let user = json!({
+        "type": "user",
+        "sessionId": id,
+        "cwd": cwd,
+        "uuid": uuid::Uuid::new_v4().to_string(),
+        "timestamp": "2026-01-01T00:00:03Z",
+        "message": {"role": "user", "content": text}
+    });
+    let assistant = json!({
+        "type": "assistant",
+        "sessionId": id,
+        "cwd": cwd,
+        "uuid": uuid::Uuid::new_v4().to_string(),
+        "timestamp": "2026-01-01T00:00:04Z",
+        "message": {"role": "assistant", "content": [{"type": "text", "text": format!("done {text}")}]}
+    });
+    raw.push_str(&serde_json::to_string(&user).unwrap());
+    raw.push('\n');
+    raw.push_str(&serde_json::to_string(&assistant).unwrap());
+    raw.push('\n');
+    fs::write(&path, raw).unwrap();
 }
 
 #[test]
@@ -252,6 +291,84 @@ fn crlf_session_round_trip() {
     assert!(lf > 0);
     assert_eq!(lf, crlf, "restored file mixed CRLF and LF");
     assert!(!String::from_utf8_lossy(&content).contains("__CAIRN_CWD__"));
+}
+
+#[test]
+fn divergent_push_creates_fork_with_point() {
+    let env = TestEnv::new();
+    let project = env.root.join("fork-project");
+    fs::create_dir_all(&project).unwrap();
+    let id = "55555555-5555-4555-8555-555555555555";
+    write_claude_session(&env.claude_a, &project, id, false);
+
+    run_args(
+        &env,
+        &[
+            "init",
+            "--store",
+            env.store.to_str().unwrap(),
+            "--name",
+            "machine-a",
+        ],
+    );
+    run_args(&env, &["push"]);
+
+    let config_b = env.root.join("config-b.toml");
+    let state_b = env.root.join("state-b.json");
+    let claude_b = env.root.join("claude-b");
+
+    let mut init_b = env.command_for(&config_b, &state_b, &claude_b);
+    init_b.args([
+        "init",
+        "--store",
+        env.store.to_str().unwrap(),
+        "--name",
+        "machine-b",
+    ]);
+    run(&mut init_b);
+
+    let mut pull_b = env.command_for(&config_b, &state_b, &claude_b);
+    pull_b.arg("pull");
+    run(&mut pull_b);
+
+    append_claude_turn(&env.claude_a, &project, id, "change from A");
+    append_claude_turn(&claude_b, &project, id, "change from B");
+
+    let mut push_a = env.command_for(&env.config, &env.state, &env.claude_a);
+    push_a.arg("push");
+    run(&mut push_a);
+
+    let mut push_b = env.command_for(&config_b, &state_b, &claude_b);
+    push_b.arg("push");
+    let out = run(&mut push_b);
+    let text = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        text.contains("diverged") || text.contains("fork"),
+        "expected a fork notice, got: {text}"
+    );
+
+    let claude_dir = env.store.join("threads").join("claude");
+    let mut forks = Vec::new();
+    for entry in fs::read_dir(&claude_dir).unwrap() {
+        let entry = entry.unwrap();
+        let meta_path = entry.path().join("meta.json");
+        if !meta_path.exists() {
+            continue;
+        }
+        let meta: Value = serde_json::from_slice(&fs::read(&meta_path).unwrap()).unwrap();
+        if meta["parent_timeline"].as_str() == Some(id) {
+            forks.push(meta);
+        }
+    }
+    assert_eq!(forks.len(), 1, "expected exactly one fork bundle");
+    let fork = &forks[0];
+    assert_ne!(fork["timeline_id"].as_str().unwrap(), id);
+    assert_eq!(fork["family_id"].as_str().unwrap(), id);
+    let point = &fork["fork_point"];
+    assert!(point["line"].as_u64().unwrap() > 0);
+    assert!(point["byte"].as_u64().unwrap() > 0);
+    assert!(point["hash"].as_str().unwrap().starts_with("sha256:"));
+    assert_eq!(point["parentTimeline"].as_str().unwrap(), id);
 }
 
 #[test]

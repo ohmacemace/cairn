@@ -3,6 +3,7 @@ pub mod config;
 pub mod error;
 pub mod git;
 pub mod hash;
+pub mod merge;
 pub mod model;
 pub mod paths;
 pub mod store;

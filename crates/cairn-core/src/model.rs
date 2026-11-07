@@ -58,6 +58,25 @@ pub struct MachineInfo {
     pub name: String,
 }
 
+/// Where a timeline diverged from its parent. Recorded as soon as a push
+/// detects divergence so later merge/read operations never have to recompute it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ForkPoint {
+    /// Timeline that kept the original line of history.
+    pub parent_timeline: String,
+    /// Number of shared lines with `parent_timeline` at the fork.
+    pub line: u64,
+    /// Number of shared bytes at the fork.
+    pub byte: u64,
+    /// Hash of the shared prefix (`sha256:<hex>`).
+    pub hash: String,
+    /// Last user/assistant message id inside the shared prefix.
+    pub message_id: Option<String>,
+    pub forked_at: i64,
+    pub forked_by: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionMeta {
     pub schema: u32,
@@ -89,6 +108,12 @@ pub struct SessionMeta {
     pub source_path: Option<String>,
     /// Set when this timeline was forked from another timeline.
     pub parent_timeline: Option<String>,
+    /// Timelines merged into this session, if it was created by a merge.
+    #[serde(default)]
+    pub merged_from: Vec<String>,
+    /// Where this timeline diverged from its parent.
+    #[serde(default)]
+    pub fork_point: Option<ForkPoint>,
     /// WSL distro when the session lives inside WSL rather than the native host.
     #[serde(default)]
     pub wsl_distro: Option<String>,

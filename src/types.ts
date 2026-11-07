@@ -41,6 +41,33 @@ export interface SessionView {
   remote: boolean;
   cwdExists: boolean;
   mappedCwd?: string | null;
+  archived: boolean;
+  mergedFrom: string[];
+}
+
+export interface MergeMaterialView {
+  agent: Agent;
+  title: string;
+  forkLine: number;
+  messageCountA: number;
+  messageCountB: number;
+  warnings: string[];
+  material: string;
+}
+
+export interface MergeBriefView {
+  brief: string;
+  command: string;
+  material: MergeMaterialView;
+}
+
+export interface MergeSessionView {
+  nativeId: string;
+  timelineId: string;
+  title: string;
+  path: string;
+  note?: string | null;
+  resumeHint: string;
 }
 
 export interface ScanResult {

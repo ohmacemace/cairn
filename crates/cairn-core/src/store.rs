@@ -234,6 +234,8 @@ mod tests {
             size_bytes: 3,
             source_path: None,
             parent_timeline: None,
+            merged_from: Vec::new(),
+            fork_point: None,
             wsl_distro: None,
         }
     }

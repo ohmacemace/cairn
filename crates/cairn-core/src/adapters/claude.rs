@@ -213,6 +213,8 @@ impl ClaudeAdapter {
             size_bytes: content.len() as u64,
             source_path: None,
             parent_timeline: None,
+            merged_from: Vec::new(),
+            fork_point: None,
             wsl_distro: self.wsl_distro.clone(),
         };
 
@@ -388,6 +390,13 @@ fn extract_user_text(value: &Value) -> Option<String> {
         }
         _ => None,
     }
+}
+
+/// Canonical content used by the store for a freshly written session.
+/// Mirrors the transformation applied by `discover`, so the first push does
+/// not see a spurious hash difference.
+pub(crate) fn standardize_for_save(raw: &[u8], max_text: usize, keep_attachments: bool) -> Vec<u8> {
+    standardize(raw, max_text, keep_attachments)
 }
 
 fn standardize(raw: &[u8], max_text: usize, keep_attachments: bool) -> Vec<u8> {

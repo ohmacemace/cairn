@@ -88,6 +88,8 @@ struct SessionView {
     remote: bool,
     cwd_exists: bool,
     mapped_cwd: Option<String>,
+    archived: bool,
+    merged_from: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -144,6 +146,49 @@ struct DoctorView {
     lines: Vec<String>,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MergeMaterialView {
+    agent: String,
+    title: String,
+    fork_line: u64,
+    message_count_a: usize,
+    message_count_b: usize,
+    warnings: Vec<String>,
+    material: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MergeBriefView {
+    brief: String,
+    command: String,
+    material: MergeMaterialView,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MergeSessionView {
+    native_id: String,
+    timeline_id: String,
+    title: String,
+    path: String,
+    note: Option<String>,
+    resume_hint: String,
+}
+
+fn merge_material_view(material: cairn_core::merge::MergeMaterial) -> MergeMaterialView {
+    MergeMaterialView {
+        agent: material.agent.to_string(),
+        title: material.title,
+        fork_line: material.fork_line,
+        message_count_a: material.message_count_a,
+        message_count_b: material.message_count_b,
+        warnings: material.warnings,
+        material: material.markdown,
+    }
+}
+
 fn err(error: impl std::fmt::Display) -> String {
     error.to_string()
 }
@@ -183,6 +228,8 @@ fn session_view(meta: &SessionMeta, local: bool, remote: bool, config: &Config) 
         remote,
         cwd_exists,
         mapped_cwd,
+        archived: meta.archived,
+        merged_from: meta.merged_from.clone(),
     }
 }
 
@@ -494,8 +541,7 @@ async fn save_settings(
 }
 
 #[tauri::command]
-async fn run_doctor() -> Result<DoctorView, String> {
-    blocking(|| {
+async fn run_doctor() -> Result<DoctorView, String> {    blocking(|| {
         let mut lines = Vec::new();
         lines.push(format!("config: {}", Config::config_path().display()));
         match load_config() {
@@ -558,6 +604,91 @@ async fn run_doctor() -> Result<DoctorView, String> {
     .await
 }
 
+#[tauri::command]
+async fn merge_material(
+    agent: String,
+    timeline_a: String,
+    timeline_b: String,
+) -> Result<MergeMaterialView, String> {
+    blocking(move || {
+        let config = load_config()?;
+        let engine = SyncEngine::new(config).map_err(err)?;
+        let parsed = Agent::from_str(&agent).map_err(err)?;
+        let material = cairn_core::merge::build_material(
+            &engine.store,
+            parsed,
+            &timeline_a,
+            &timeline_b,
+        )
+        .map_err(err)?;
+        Ok(merge_material_view(material))
+    })
+    .await
+}
+
+#[tauri::command]
+async fn generate_merge_brief(
+    agent: String,
+    timeline_a: String,
+    timeline_b: String,
+) -> Result<MergeBriefView, String> {
+    blocking(move || {
+        let config = load_config()?;
+        let engine = SyncEngine::new(config).map_err(err)?;
+        let parsed = Agent::from_str(&agent).map_err(err)?;
+        let brief = cairn_core::merge::generate_brief(
+            &engine,
+            parsed,
+            &timeline_a,
+            &timeline_b,
+        )
+        .map_err(err)?;
+        Ok(MergeBriefView {
+            brief: brief.brief,
+            command: brief.command,
+            material: merge_material_view(brief.material),
+        })
+    })
+    .await
+}
+
+#[tauri::command]
+async fn create_merged_session(
+    agent: String,
+    timeline_a: String,
+    timeline_b: String,
+    brief: String,
+    cwd: String,
+) -> Result<MergeSessionView, String> {
+    blocking(move || {
+        let config = load_config()?;
+        let engine = SyncEngine::new(config).map_err(err)?;
+        let parsed = Agent::from_str(&agent).map_err(err)?;
+        let target = expand_tilde(cwd.trim());
+        if target.to_string_lossy().trim().is_empty() {
+            return Err("请选择合并会话的工作目录".to_string());
+        }
+        let merged = cairn_core::merge::create_merged_session(
+            &engine,
+            parsed,
+            &timeline_a,
+            &timeline_b,
+            &brief,
+            &target,
+        )
+        .map_err(err)?;
+        Ok(MergeSessionView {
+            native_id: merged.meta.native_id.clone(),
+            timeline_id: merged.meta.timeline_id.clone(),
+            title: merged.meta.title.clone(),
+            path: merged.path.to_string_lossy().to_string(),
+            note: merged.note,
+            resume_hint: resume_hint(&merged.meta),
+        })
+    })
+    .await
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -572,7 +703,10 @@ pub fn run() {
             pull_store,
             restore_session,
             save_settings,
-            run_doctor
+            run_doctor,
+            merge_material,
+            generate_merge_brief,
+            create_merged_session
         ])
         .run(tauri::generate_context!())
         .expect("error while running Cairn");

@@ -12,7 +12,9 @@ use crate::hash::sha256_hex;
 use crate::model::{
     Agent, ImportOutcome, MachineInfo, SaveMode, SessionMeta, SessionRecord, BUNDLE_SCHEMA,
 };
-use crate::paths::{now_ts, project_identity, rewrite_cwd, CWD_PLACEHOLDER};
+use crate::paths::{
+    now_ts, project_identity, push_line_ending, rewrite_cwd, split_line_ending, CWD_PLACEHOLDER,
+};
 
 #[derive(Debug, Clone)]
 pub struct CodexAdapter {
@@ -64,6 +66,7 @@ impl AgentAdapter for CodexAdapter {
                 continue;
             }
             let raw = std::fs::read(&path)?;
+            let raw = canonicalize_history_mode(&raw);
             let canonical_raw = rewrite_cwd(&raw, &thread.cwd, CWD_PLACEHOLDER);
             let content = match self.save.mode {
                 SaveMode::Index => Vec::new(),
@@ -106,6 +109,8 @@ impl AgentAdapter for CodexAdapter {
                 size_bytes: content.len() as u64,
                 source_path,
                 parent_timeline: None,
+                merged_from: Vec::new(),
+                fork_point: None,
                 wsl_distro: self.wsl_distro.clone(),
             };
 
@@ -136,6 +141,7 @@ impl AgentAdapter for CodexAdapter {
             &record.meta.cwd,
             &new_cwd,
         );
+        let content = canonicalize_history_mode(&content);
 
         let target = if let Some(rel) = &record.meta.source_path {
             self.sessions_dir().join(rel)
@@ -173,13 +179,7 @@ impl AgentAdapter for CodexAdapter {
 
         // Let Codex rebuild its SQLite thread index from the rollout file.
         let output = Command::new(&self.bin)
-            .args([
-                "migrate-rollouts",
-                "--apply",
-                "--thread",
-                &record.meta.native_id,
-                "--json",
-            ])
+            .args(["migrate-rollouts", "--apply", "--json"])
             .env("CODEX_HOME", &self.home)
             .output();
 
@@ -399,6 +399,51 @@ impl Drop for AppServer {
     }
 }
 
+/// Codex 0.167+ writes `history_mode: "paginated"` and keeps the actual turn
+/// history in a machine-local SQLite database that Cairn never syncs. A rollout
+/// restored on another machine therefore has to be marked `legacy` so that
+/// `codex migrate-rollouts` rebuilds the history from the JSONL itself.
+///
+/// The rewrite is applied both when reading a rollout and when writing one, so
+/// the canonical hash stays stable even after Codex rewrites the file back to
+/// `paginated` during migration.
+pub(crate) fn canonicalize_history_mode(raw: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(raw.len());
+    for chunk in raw.split_inclusive(|b| *b == b'\n') {
+        let (line, has_cr, has_newline) = split_line_ending(chunk);
+        if line.is_empty() {
+            push_line_ending(&mut out, has_cr, has_newline);
+            continue;
+        }
+
+        let rewritten = serde_json::from_slice::<Value>(line)
+            .ok()
+            .and_then(|mut value| {
+                if value.get("type").and_then(Value::as_str) != Some("session_meta") {
+                    return None;
+                }
+                let payload = value.get_mut("payload")?.as_object_mut()?;
+                match payload.get("history_mode").and_then(Value::as_str) {
+                    // Missing means legacy for old rollouts: leave the bytes alone
+                    // so their hash does not change.
+                    None => None,
+                    Some("legacy") => None,
+                    Some(_) => {
+                        payload.insert("history_mode".into(), Value::String("legacy".into()));
+                        serde_json::to_vec(&value).ok()
+                    }
+                }
+            });
+
+        match rewritten {
+            Some(line) => out.extend_from_slice(&line),
+            None => out.extend_from_slice(line),
+        }
+        push_line_ending(&mut out, has_cr, has_newline);
+    }
+    out
+}
+
 fn has_rollouts(dir: &Path) -> bool {
     WalkDir::new(dir)
         .max_depth(6)
@@ -408,4 +453,43 @@ fn has_rollouts(dir: &Path) -> bool {
             e.file_type().is_file()
                 && e.path().extension().and_then(|s| s.to_str()) == Some("jsonl")
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn canonicalize_history_mode_rewrites_paginated() {
+        let raw = br#"{"type":"session_meta","payload":{"id":"a","history_mode":"paginated"}}"#;
+        let out = canonicalize_history_mode(&[raw.as_slice(), b"\n"].concat());
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains(r#""history_mode":"legacy""#));
+        assert!(text.ends_with('\n'));
+    }
+
+    #[test]
+    fn canonicalize_history_mode_preserves_other_lines_and_crlf() {
+        let raw = b"{\"type\":\"session_meta\",\"payload\":{\"history_mode\":\"paginated\"}}\r\n{\"type\":\"response_item\",\"payload\":{\"n\":1}}\r\n";
+        let out = canonicalize_history_mode(raw);
+        let text = String::from_utf8(out).unwrap();
+        assert_eq!(text.matches("\r\n").count(), 2);
+        assert!(text.contains(r#"{"type":"response_item","payload":{"n":1}}"#));
+        assert!(text.contains(r#""history_mode":"legacy""#));
+    }
+
+    #[test]
+    fn canonicalize_history_mode_leaves_legacy_and_missing_untouched() {
+        let legacy = br#"{"type":"session_meta","payload":{"history_mode":"legacy"}}"#;
+        assert_eq!(
+            canonicalize_history_mode(&[legacy.as_slice(), b"\n"].concat()),
+            [legacy.as_slice(), b"\n"].concat()
+        );
+
+        let missing = br#"{"type":"session_meta","payload":{"id":"a"}}"#;
+        assert_eq!(
+            canonicalize_history_mode(&[missing.as_slice(), b"\n"].concat()),
+            [missing.as_slice(), b"\n"].concat()
+        );
+    }
 }

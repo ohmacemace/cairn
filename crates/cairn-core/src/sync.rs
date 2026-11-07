@@ -153,7 +153,26 @@ impl SyncEngine {
         for meta in store {
             let key = (meta.agent, meta.timeline_id.clone());
             match by_key.get_mut(&key) {
-                Some(entry) => entry.remote = true,
+                Some(entry) => {
+                    entry.remote = true;
+                    // Store metadata is authoritative for archive and merge data;
+                    // local adapters cannot know about it.
+                    entry.meta.archived |= meta.archived;
+                    if entry.meta.parent_timeline.is_none() {
+                        entry.meta.parent_timeline = meta.parent_timeline.clone();
+                    }
+                    if entry.meta.fork_point.is_none() {
+                        entry.meta.fork_point = meta.fork_point.clone();
+                    }
+                    if entry.meta.merged_from.is_empty() {
+                        entry.meta.merged_from = meta.merged_from.clone();
+                    }
+                    if !meta.merged_from.is_empty() {
+                        // Merge titles are authored once; do not replace them
+                        // with the first line of the generated brief.
+                        entry.meta.title = meta.title.clone();
+                    }
+                }
                 None => {
                     by_key.insert(
                         key,
@@ -233,6 +252,25 @@ impl SyncEngine {
                         fork.meta.timeline_id = new_timeline.clone();
                         fork.meta.parent_timeline = Some(remote_meta.timeline_id.clone());
                         fork.meta.family_id = remote_meta.family_id.clone();
+                        if let Ok(remote_record) = self
+                            .store
+                            .read_bundle(record.meta.agent, &remote_meta.timeline_id)
+                        {
+                            let (line, byte, hash, message_id) = crate::merge::common_prefix(
+                                &record.content,
+                                &remote_record.content,
+                                record.meta.agent,
+                            );
+                            fork.meta.fork_point = Some(crate::model::ForkPoint {
+                                parent_timeline: remote_meta.timeline_id.clone(),
+                                line,
+                                byte,
+                                hash,
+                                message_id,
+                                forked_at: now_ts(),
+                                forked_by: self.config.machine_id.clone(),
+                            });
+                        }
                         if !dry_run {
                             self.store.write_bundle(&fork)?;
                         }
@@ -287,7 +325,7 @@ impl SyncEngine {
         let scan = self.scan()?;
         report.warnings.extend(scan.warnings);
 
-        let local_by_native: BTreeMap<(Agent, String), SessionRecord> = scan
+        let mut local_by_native: BTreeMap<(Agent, String), SessionRecord> = scan
             .records
             .into_iter()
             .map(|record| ((record.meta.agent, record.meta.native_id.clone()), record))
@@ -295,8 +333,9 @@ impl SyncEngine {
 
         let state_path = Config::state_path();
         let mut state = SyncState::load(&state_path)?;
+        let remote_bundles = self.store.list_bundles()?;
 
-        for meta in self.store.list_bundles()? {
+        for meta in &remote_bundles {
             let key = SyncState::key(meta.agent, &meta.timeline_id);
             if let Some(local) = local_by_native.get(&(meta.agent, meta.native_id.clone())) {
                 if local.meta.content_hash == meta.content_hash {
@@ -309,6 +348,23 @@ impl SyncEngine {
                             synced_at: now_ts(),
                         },
                     );
+                    continue;
+                }
+
+                // The local native session may be another timeline of the same
+                // family (forks share the native id in the store). Never
+                // overwrite it during a bulk pull.
+                let local_is_sibling = remote_bundles.iter().any(|other| {
+                    other.agent == meta.agent
+                        && other.timeline_id != meta.timeline_id
+                        && other.native_id == meta.native_id
+                        && other.content_hash == local.meta.content_hash
+                });
+                if local_is_sibling {
+                    report.conflicts.push(format!(
+                        "{} {}: another timeline already uses this native id locally; skipped",
+                        meta.agent, meta.native_id
+                    ));
                     continue;
                 }
 
@@ -379,6 +435,10 @@ impl SyncEngine {
                     record.meta.agent, record.meta.native_id, note
                 ));
             }
+            local_by_native.insert(
+                (record.meta.agent, record.meta.native_id.clone()),
+                record.clone(),
+            );
             state.timelines.insert(
                 key,
                 crate::config::TimelineState {
@@ -482,6 +542,23 @@ impl SyncEngine {
 
         if record.meta.wsl_distro.is_none() && !target_cwd.exists() {
             std::fs::create_dir_all(&target_cwd)?;
+        }
+
+        // A fork keeps the parent's native id in the store. It cannot be
+        // materialized next to the parent on the same machine without
+        // overwriting it, so refuse instead of silently replacing data.
+        if !record.content.is_empty() && record.meta.timeline_id != record.meta.native_id {
+            let scan = self.scan()?;
+            if let Some(local) = scan.records.iter().find(|local| {
+                local.meta.agent == agent && local.meta.native_id == record.meta.native_id
+            }) {
+                if local.meta.content_hash != record.meta.content_hash {
+                    return Err(Error::Config(format!(
+                        "原生会话 {} 已被本机另一条时间线占用。请先备份或移除本机会话，再恢复这条分叉。",
+                        record.meta.native_id
+                    )));
+                }
+            }
         }
 
         let adapter = self.adapter_for_meta(&record.meta)?;

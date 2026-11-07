@@ -103,6 +103,7 @@ dependencies = [
  "clap",
  "serde_json",
  "tempfile",
+ "uuid",
 ]
 
 [[package]]

@@ -6,6 +6,7 @@ import {
   Check,
   Copy,
   FolderGit2,
+  GitMerge,
   HardDrive,
   Laptop,
   Loader2,
@@ -15,8 +16,11 @@ import {
   Terminal,
   Wifi,
   WifiOff,
+  X,
 } from "lucide-react";
 import {
+  createMergedSession,
+  generateMergeBrief,
   getConfig,
   initStore,
   isDesktop,
@@ -34,6 +38,7 @@ import { t } from "./i18n";
 import type {
   Agent,
   ConfigView,
+  MergeMaterialView,
   SessionView,
   StatusView,
   WslSourceView,
@@ -509,6 +514,12 @@ function Workspace({
                         {session.parentTimeline && (
                           <span className="badge fork">分叉</span>
                         )}
+                        {session.mergedFrom?.length > 0 && (
+                          <span className="badge merge">合并</span>
+                        )}
+                        {session.archived && (
+                          <span className="badge archived">已归档</span>
+                        )}
                         {!session.local && <span className="badge remote">云端</span>}
                         {session.wslDistro && (
                           <span className="badge wsl">WSL</span>
@@ -581,11 +592,16 @@ function SessionDetail({
 }) {
   const [restoreCwd, setRestoreCwd] = useState(session.mappedCwd || session.cwd);
   const [busy, setBusy] = useState(false);
+  const [mergeOpen, setMergeOpen] = useState(false);
   const [result, setResult] = useState<{
     path: string;
     note?: string | null;
     hint: string;
   } | null>(null);
+  const remoteTimelines = timelines.filter(
+    (timeline) => timeline.remote && !timeline.archived,
+  );
+  const canMerge = remoteTimelines.length >= 2;
 
   async function restore() {
     setBusy(true);
@@ -681,11 +697,40 @@ function SessionDetail({
                   <span className="timeline-flags">
                     {timeline.local ? "本机" : "云端"}
                     {timeline.remote ? " · 已同步" : ""}
+                    {timeline.archived ? " · 已归档" : ""}
                   </span>
                 </button>
               );
             })}
+          <button
+            className="button primary wide merge-entry"
+            onClick={() => setMergeOpen(true)}
+            disabled={!canMerge}
+            title={
+              canMerge
+                ? "选择两条时间线，生成合并简报并创建新会话"
+                : "至少需要两条已推送到会话仓库的时间线"
+            }
+          >
+            <GitMerge size={15} />
+            合并时间线
+          </button>
+          {!canMerge && (
+            <p className="muted restore-hint">
+              合并前需要先推送两条时间线，并确保它们都没有归档。
+            </p>
+          )}
         </div>
+      )}
+
+      {mergeOpen && (
+        <MergeModal
+          session={session}
+          timelines={timelines}
+          onClose={() => setMergeOpen(false)}
+          onCreated={onRestored}
+          onToast={onToast}
+        />
       )}
 
       <div className="meta-grid">
@@ -769,6 +814,289 @@ function SessionDetail({
       <div className="detail-footer">
         <span className="muted">来源</span>
         <span>{session.source || "unknown"}</span>
+      </div>
+    </div>
+  );
+}
+
+function MergeModal({
+  session,
+  timelines,
+  onClose,
+  onCreated,
+  onToast,
+}: {
+  session: SessionView;
+  timelines: SessionView[];
+  onClose: () => void;
+  onCreated: () => void;
+  onToast: (toast: { kind: "ok" | "error"; text: string }) => void;
+}) {
+  const candidates = timelines.filter(
+    (timeline) => timeline.remote && !timeline.archived,
+  );
+  const first = candidates.find(
+    (timeline) => timeline.timelineId === session.timelineId,
+  ) ?? candidates[0];
+  const second = candidates.find(
+    (timeline) => timeline.timelineId !== first?.timelineId,
+  );
+  const [a, setA] = useState(first?.timelineId ?? "");
+  const [b, setB] = useState(second?.timelineId ?? "");
+  const [phase, setPhase] = useState<"idle" | "generating" | "review" | "creating">(
+    "idle",
+  );
+  const [brief, setBrief] = useState("");
+  const [material, setMaterial] = useState<MergeMaterialView | null>(null);
+  const [command, setCommand] = useState("");
+  const [target, setTarget] = useState(session.mappedCwd || session.cwd);
+  const [error, setError] = useState<string | null>(null);
+  const busy = phase === "generating" || phase === "creating";
+
+  async function generate() {
+    if (!a || !b || a === b) {
+      setError("请选择两条不同的时间线");
+      return;
+    }
+    setPhase("generating");
+    setError(null);
+    try {
+      const result = await generateMergeBrief(session.agent, a, b);
+      setBrief(result.brief);
+      setMaterial(result.material);
+      setCommand(result.command);
+      setPhase("review");
+    } catch (err) {
+      setError(String(err));
+      setPhase("idle");
+    }
+  }
+
+  async function pickTarget() {
+    const picked = await pickDirectory(target || session.cwd);
+    if (picked) setTarget(picked);
+  }
+
+  async function create() {
+    if (!brief.trim()) {
+      setError("合并简报为空");
+      return;
+    }
+    if (!target.trim()) {
+      setError("请选择合并会话的工作目录");
+      return;
+    }
+    setPhase("creating");
+    setError(null);
+    try {
+      const created = await createMergedSession(
+        session.agent,
+        a,
+        b,
+        brief,
+        target.trim(),
+      );
+      onToast({
+        kind: "ok",
+        text: `已创建合并会话：${created.title}。旧时间线已归档。`,
+      });
+      onCreated();
+      onClose();
+    } catch (err) {
+      setError(String(err));
+      setPhase("review");
+    }
+  }
+
+  return (
+    <div
+      className="modal-overlay"
+      onClick={() => {
+        if (!busy) onClose();
+      }}
+    >
+      <div className="modal merge-modal" onClick={(event) => event.stopPropagation()}>
+        <div className="modal-head">
+          <div>
+            <h2>合并时间线</h2>
+            <p className="muted">
+              使用这条会话自己的 agent（
+              {session.agent === "codex" ? "Codex" : "Claude Code"}）生成合并简报。
+            </p>
+          </div>
+          <button
+            className="icon-button"
+            onClick={onClose}
+            disabled={busy}
+            title="关闭"
+          >
+            <X size={16} />
+          </button>
+        </div>
+
+        <div className="merge-pickers">
+          <label className="stack-tight">
+            <span>时间线 A</span>
+            <select
+              value={a}
+              onChange={(event) => setA(event.target.value)}
+              disabled={busy}
+            >
+              {candidates.map((timeline) => (
+                <option key={timeline.timelineId} value={timeline.timelineId}>
+                  {timeline.timelineId === timeline.familyId ? "主线" : "分叉"} ·{" "}
+                  {timeline.machineName} · {formatTime(timeline.updatedAt)}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="stack-tight">
+            <span>时间线 B</span>
+            <select
+              value={b}
+              onChange={(event) => setB(event.target.value)}
+              disabled={busy}
+            >
+              <option value="">选择另一条时间线</option>
+              {candidates
+                .filter((timeline) => timeline.timelineId !== a)
+                .map((timeline) => (
+                  <option key={timeline.timelineId} value={timeline.timelineId}>
+                    {timeline.timelineId === timeline.familyId ? "主线" : "分叉"} ·{" "}
+                    {timeline.machineName} · {formatTime(timeline.updatedAt)}
+                  </option>
+                ))}
+            </select>
+          </label>
+        </div>
+
+        {phase === "idle" && (
+          <div className="merge-explain">
+            <p>
+              第一步：Cairn 提取两条时间线分叉后的消息、文件改动、命令和错误，生成材料包。
+              agent 只读取材料包并输出 Markdown，不会修改你的项目或会话。
+            </p>
+            <p className="muted">
+              调用 {session.agent === "codex" ? "codex exec" : "claude --print"} 会消耗你
+              自己的 agent 额度。材料包可能包含代码片段，请确认后再继续。
+            </p>
+          </div>
+        )}
+
+        {phase === "generating" && (
+          <div className="merge-progress">
+            <Loader2 className="spin" size={18} />
+            <span>
+              正在调用 {session.agent === "codex" ? "Codex" : "Claude Code"} 生成简报…
+            </span>
+          </div>
+        )}
+
+        {(phase === "review" || phase === "creating") && (
+          <>
+            <div className="merge-progress-line">
+              <Check size={14} />
+              <span>
+                已生成简报（{material?.messageCountA ?? 0} +{" "}
+                {material?.messageCountB ?? 0} 条分叉后对话）
+              </span>
+              <button
+                className="button ghost"
+                onClick={() => void generate()}
+                disabled={busy}
+              >
+                <RefreshCw size={14} />
+                重新生成
+              </button>
+            </div>
+
+            {material && material.warnings.length > 0 && (
+              <div className="alert warn">
+                <AlertTriangle size={15} />
+                <span>{material.warnings.join("；")}</span>
+              </div>
+            )}
+
+            <label className="stack-tight">
+              <span>合并简报（可编辑）</span>
+              <textarea
+                className="merge-brief"
+                value={brief}
+                onChange={(event) => setBrief(event.target.value)}
+                disabled={phase === "creating"}
+              />
+            </label>
+
+            {material && (
+              <details className="merge-material">
+                <summary>查看原始材料包</summary>
+                <pre>{material.material}</pre>
+              </details>
+            )}
+
+            <div className="merge-target">
+              <label className="stack-tight">
+                <span>新会话工作目录</span>
+                <input
+                  value={target}
+                  onChange={(event) => setTarget(event.target.value)}
+                  disabled={phase === "creating"}
+                />
+              </label>
+              <button
+                className="button ghost"
+                onClick={() => void pickTarget()}
+                disabled={busy}
+              >
+                <FolderGit2 size={15} />
+                选择目录
+              </button>
+            </div>
+
+            <p className="muted merge-note">
+              创建后会生成一个新的原生会话，简报作为第一条消息。原来的两条时间线会归档，
+              但不会删除；代码冲突仍需回项目仓库用 Git 处理。
+            </p>
+
+            <button
+              className="button primary wide"
+              onClick={() => void create()}
+              disabled={busy}
+            >
+              {phase === "creating" ? (
+                <Loader2 className="spin" size={15} />
+              ) : (
+                <GitMerge size={15} />
+              )}
+              {phase === "creating" ? "正在创建合并会话…" : "创建合并会话"}
+            </button>
+          </>
+        )}
+
+        {command && <p className="muted mono merge-command">{command}</p>}
+
+        {error && (
+          <div className="alert error">
+            <AlertTriangle size={15} />
+            <span>{error}</span>
+          </div>
+        )}
+
+        {phase === "idle" && (
+          <div className="modal-actions">
+            <button className="button ghost" onClick={onClose}>
+              取消
+            </button>
+            <button
+              className="button primary"
+              onClick={() => void generate()}
+              disabled={!a || !b || a === b}
+            >
+              <GitMerge size={15} />
+              生成合并简报
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );

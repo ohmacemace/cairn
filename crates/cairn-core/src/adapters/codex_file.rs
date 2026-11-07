@@ -13,6 +13,8 @@ use crate::paths::{
     rewrite_cwd, split_line_ending, wsl_git_info, CWD_PLACEHOLDER,
 };
 
+use super::codex::canonicalize_history_mode;
+
 /// File-based Codex adapter for sessions inside WSL.
 ///
 /// It deliberately does not spawn `codex app-server` and never touches the
@@ -137,7 +139,7 @@ impl CodexFileAdapter {
             )
         };
 
-        let content = rewrite_cwd(&raw, &cwd, CWD_PLACEHOLDER);
+        let content = rewrite_cwd(&canonicalize_history_mode(&raw), &cwd, CWD_PLACEHOLDER);
         let source_path = path
             .strip_prefix(self.sessions_dir())
             .ok()
@@ -168,6 +170,8 @@ impl CodexFileAdapter {
             size_bytes: content.len() as u64,
             source_path,
             parent_timeline: None,
+            merged_from: Vec::new(),
+            fork_point: None,
             wsl_distro: Some(self.wsl_distro.clone()),
         };
 
@@ -225,6 +229,7 @@ impl AgentAdapter for CodexFileAdapter {
             &record.meta.cwd,
             &new_cwd,
         );
+        let content = canonicalize_history_mode(&content);
 
         let target = if let Some(rel) = &record.meta.source_path {
             self.sessions_dir().join(rel)
@@ -251,7 +256,7 @@ impl AgentAdapter for CodexFileAdapter {
                     note: Some("already up to date".into()),
                 });
             }
-            let backup = target.with_extension(format!("jsonl.ctxsync-backup-{}", now_ts()));
+            let backup = target.with_extension(format!("jsonl.cairn-backup-{}", now_ts()));
             std::fs::copy(&target, &backup)?;
             note = Some(format!(
                 "backed up existing rollout to {}",

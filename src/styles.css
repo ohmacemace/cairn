@@ -594,6 +594,18 @@ input:focus {
   background: rgba(255, 122, 122, 0.07);
 }
 
+.badge.merge {
+  color: #c9b8ff;
+  border-color: rgba(167, 139, 250, 0.3);
+  background: rgba(167, 139, 250, 0.09);
+}
+
+.badge.archived {
+  color: var(--muted-2);
+  border-color: rgba(255, 255, 255, 0.09);
+  background: rgba(255, 255, 255, 0.03);
+}
+
 .search {
   width: 230px;
   height: 34px;
@@ -1088,6 +1100,168 @@ input:focus {
   font-size: 11.5px;
   line-height: 1.75;
   color: #b9c5d6;
+}
+
+/* Merge modal */
+
+.merge-entry {
+  margin-top: 10px;
+}
+
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(7, 10, 15, 0.76);
+  backdrop-filter: blur(4px);
+  z-index: 20;
+}
+
+.modal {
+  width: min(760px, 100%);
+  max-height: min(88vh, 900px);
+  overflow: auto;
+  padding: 20px;
+  border-radius: 16px;
+  border: 1px solid var(--border);
+  background: rgba(17, 22, 30, 0.98);
+  box-shadow: 0 28px 90px rgba(0, 0, 0, 0.55);
+}
+
+.modal-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+.modal-head h2 {
+  margin: 0 0 4px;
+  font-size: 17px;
+}
+
+.modal-head p {
+  margin: 0;
+  font-size: 12px;
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.merge-pickers {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.merge-pickers select {
+  width: 100%;
+  height: 34px;
+  padding: 0 8px;
+  font-size: 12px;
+}
+
+.merge-explain {
+  margin-top: 14px;
+  padding: 12px 14px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.02);
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+.merge-explain p {
+  margin: 0 0 6px;
+}
+
+.merge-explain p:last-child {
+  margin-bottom: 0;
+}
+
+.merge-progress,
+.merge-progress-line {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 16px 0;
+  font-size: 12.5px;
+}
+
+.merge-progress-line {
+  justify-content: space-between;
+}
+
+.merge-progress-line span {
+  flex: 1;
+}
+
+.merge-brief {
+  width: 100%;
+  min-height: 280px;
+  resize: vertical;
+  padding: 10px 12px;
+  font-family: "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
+  font-size: 11.5px;
+  line-height: 1.65;
+}
+
+.merge-material {
+  margin: 12px 0;
+  font-size: 12px;
+}
+
+.merge-material summary {
+  cursor: pointer;
+  color: var(--muted);
+}
+
+.merge-material pre {
+  max-height: 260px;
+  overflow: auto;
+  padding: 12px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: rgba(0, 0, 0, 0.22);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.merge-target {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+  margin: 12px 0;
+}
+
+.merge-target label {
+  flex: 1;
+}
+
+.merge-note {
+  font-size: 11.5px;
+  line-height: 1.7;
+  margin: 10px 0 14px;
+}
+
+.merge-command {
+  margin-top: 10px;
+  font-size: 10.5px;
+}
+
+@media (max-width: 720px) {
+  .merge-pickers {
+    grid-template-columns: 1fr;
+  }
 }
 
 /* Toast */

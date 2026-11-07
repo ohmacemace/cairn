@@ -4,7 +4,7 @@
 
 Cairn keeps your Codex and Claude Code sessions in a private Git repository you own, so you can pick up the same conversation on another machine without recreating context.
 
-> Status: early development (M1). The core engine and CLI work on Linux. The desktop app, macOS/Windows packaging, and timeline UI are in progress.
+> Status: v0.1 development. Core engine, CLI, automatic timeline forks, merge sessions, and the Tauri desktop app are implemented. Packaging and real-device validation are in progress.
 
 ## The problem
 
@@ -55,9 +55,7 @@ CI builds the desktop shell on Ubuntu, macOS, and Windows.
 # 1. Connect a private Git repository as the session store.
 cairn init \
   --store ~/Sync/cairn \
-  --remote git@github.com:you/cairn-store.git \
-  --git-name "Your Name" \
-  --git-email "you@example.com"
+  --remote git@github.com:you/cairn-store.git
 
 # 2. See local sessions.
 cairn scan
@@ -71,6 +69,18 @@ cairn restore <session-id> --cwd ~/code/project
 ```
 
 `restore --open` runs the native resume command after restoring.
+
+## Timelines and merge
+
+Session files are append-only. When two machines continue the same session, the first push keeps the original timeline and the later push is stored as a fork. Cairn records the fork point (line, byte offset, prefix hash) at the moment divergence is detected, so later operations do not have to rescan the whole history. Session JSONL is never text-merged by Git.
+
+To combine two timelines, open the session in the desktop app and choose **Merge timelines**:
+
+1. Cairn extracts a structured material pack from the fork point onward: user requests, assistant results, changed files, commands, errors, and existing compaction summaries.
+2. It invokes the session's own agent CLI in read-only mode to turn the pack into a Markdown brief: `codex exec --sandbox read-only --ephemeral` or `claude --print --tools "" --no-session-persistence`. Cairn does not call a model API itself.
+3. Review or edit the brief, then create a merged session. The new session gets a fresh native id, the brief as its first user message, and `mergedFrom` metadata. The source timelines are archived, not deleted.
+
+Code conflicts are not merged by Cairn; resolve them in the project's own Git repository.
 
 ## Save modes
 
@@ -119,9 +129,9 @@ Session transcripts can contain source code, command output, and secrets. **Alwa
 
 - [x] M0: validate Codex / Claude Code restore paths
 - [x] M1: core engine, Git store, CLI, Claude + Codex adapters
-- [ ] M2: timelines, leases, conflict handling, Codex trimming validation
-- [ ] M3: Tauri desktop app, three-platform packaging
-- [ ] M4: polish, auto-sync, tray, first public release
+- [x] M2: timelines, automatic forks, fork points, merge sessions
+- [x] M3: Tauri desktop app
+- [ ] M4: polish, auto-sync, tray, packaging validation, first public release
 
 ## License
 
