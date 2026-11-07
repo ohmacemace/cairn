@@ -281,6 +281,7 @@ impl SyncEngine {
                         let mut fork = record.clone();
                         let new_timeline = uuid::Uuid::new_v4().to_string();
                         preserve_store_meta(&mut fork, remote_meta);
+                        fork.meta.archived = false;
                         fork.meta.timeline_id = new_timeline.clone();
                         fork.meta.parent_timeline = Some(remote_meta.timeline_id.clone());
                         fork.meta.family_id = remote_meta.family_id.clone();
@@ -507,11 +508,13 @@ impl SyncEngine {
         // local native-id mapping so scans keep them separate from the parent.
         let state_path = Config::state_path();
         let mut state = SyncState::load(&state_path)?;
+        let native_key = SyncState::native_key(agent, &record.meta.native_id);
         if record.meta.timeline_id != record.meta.native_id {
-            state.local_timelines.insert(
-                SyncState::native_key(agent, &record.meta.native_id),
-                record.meta.timeline_id.clone(),
-            );
+            state
+                .local_timelines
+                .insert(native_key, record.meta.timeline_id.clone());
+        } else {
+            state.local_timelines.remove(&native_key);
         }
         state.timelines.insert(
             SyncState::key(agent, &record.meta.timeline_id),
