@@ -13,7 +13,8 @@ use crate::model::{
     Agent, ImportOutcome, MachineInfo, SaveMode, SessionMeta, SessionRecord, BUNDLE_SCHEMA,
 };
 use crate::paths::{
-    now_ts, project_identity, push_line_ending, rewrite_cwd, split_line_ending, CWD_PLACEHOLDER,
+    now_ts, project_identity, push_line_ending, restore_cwd, rewrite_cwd, split_line_ending,
+    CWD_PLACEHOLDER,
 };
 
 #[derive(Debug, Clone)]
@@ -136,11 +137,7 @@ impl AgentAdapter for CodexAdapter {
         }
 
         let new_cwd = target_cwd.to_string_lossy().to_string();
-        let content = rewrite_cwd(
-            &rewrite_cwd(&record.content, CWD_PLACEHOLDER, &new_cwd),
-            &record.meta.cwd,
-            &new_cwd,
-        );
+        let content = restore_cwd(&record.content, &record.meta.cwd, &new_cwd);
         let content = canonicalize_history_mode(&content);
 
         let target = if let Some(rel) = &record.meta.source_path {

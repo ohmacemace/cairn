@@ -344,6 +344,16 @@ fn rewrite_value(value: &mut Value, old_variants: &[String], new: &str) {
     }
 }
 
+/// Restore canonical session content into a concrete working directory.
+///
+/// The old cwd is rewritten first and the placeholder second. Doing it in the
+/// other order would corrupt paths where the new directory extends the old one
+/// (for example `/proj` -> `/proj2` becomes `/proj22`).
+pub fn restore_cwd(content: &[u8], old: &str, new: &str) -> Vec<u8> {
+    let rewritten = rewrite_cwd(content, old, new);
+    rewrite_cwd(&rewritten, CWD_PLACEHOLDER, new)
+}
+
 pub fn clean_title(text: &str) -> String {
     for line in text.lines() {
         if is_command_text(line) {
@@ -484,5 +494,14 @@ mod tests {
             String::from_utf8(out).unwrap(),
             "{\"cwd\":\"/home/b/proj\"}\r\n{\"cwd\":\"/home/b/proj\"}\r\n"
         );
+    }
+
+    #[test]
+    fn restore_cwd_handles_new_path_extending_old_path() {
+        let raw = b"{\"cwd\":\"__CAIRN_CWD__\",\"text\":\"/work/proj\"}\n";
+        let out = restore_cwd(raw, "/work/proj", "/work/proj2");
+        let value: Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(value["cwd"], "/work/proj2");
+        assert_eq!(value["text"], "/work/proj2");
     }
 }

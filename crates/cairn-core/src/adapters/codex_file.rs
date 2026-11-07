@@ -10,7 +10,7 @@ use crate::hash::sha256_hex;
 use crate::model::{Agent, ImportOutcome, MachineInfo, SessionMeta, SessionRecord, BUNDLE_SCHEMA};
 use crate::paths::{
     clean_title, file_mtime, normalize_git_remote, now_ts, parse_timestamp, project_key,
-    rewrite_cwd, split_line_ending, wsl_git_info, CWD_PLACEHOLDER,
+    restore_cwd, rewrite_cwd, split_line_ending, wsl_git_info, CWD_PLACEHOLDER,
 };
 
 use super::codex::canonicalize_history_mode;
@@ -224,11 +224,7 @@ impl AgentAdapter for CodexFileAdapter {
         }
 
         let new_cwd = target_cwd.to_string_lossy().to_string();
-        let content = rewrite_cwd(
-            &rewrite_cwd(&record.content, CWD_PLACEHOLDER, &new_cwd),
-            &record.meta.cwd,
-            &new_cwd,
-        );
+        let content = restore_cwd(&record.content, &record.meta.cwd, &new_cwd);
         let content = canonicalize_history_mode(&content);
 
         let target = if let Some(rel) = &record.meta.source_path {

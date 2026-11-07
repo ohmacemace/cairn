@@ -13,7 +13,7 @@ use crate::model::{
 };
 use crate::paths::{
     claude_project_dir_for, clean_title, file_mtime, is_command_text, normalize_git_remote, now_ts,
-    parse_timestamp, project_identity, project_key, push_line_ending, rewrite_cwd,
+    parse_timestamp, project_identity, project_key, push_line_ending, restore_cwd, rewrite_cwd,
     split_line_ending, wsl_git_info, CWD_PLACEHOLDER,
 };
 
@@ -302,11 +302,7 @@ impl AgentAdapter for ClaudeAdapter {
 
         let old_cwd = &record.meta.cwd;
         let new_cwd = target_cwd.to_string_lossy().to_string();
-        let content = rewrite_cwd(
-            &rewrite_cwd(&record.content, CWD_PLACEHOLDER, &new_cwd),
-            old_cwd,
-            &new_cwd,
-        );
+        let content = restore_cwd(&record.content, old_cwd, &new_cwd);
 
         let project_dir = claude_project_dir_for(&self.home, target_cwd);
         std::fs::create_dir_all(&project_dir)?;
