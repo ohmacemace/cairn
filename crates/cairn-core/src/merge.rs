@@ -1434,14 +1434,6 @@ mod tests {
             forked_at: 1,
             forked_by: "m".into(),
         };
-        let mut a = meta("a", "f", None);
-        a.agent = Agent::Claude;
-        a.content_hash = "h1".into();
-        let mut b = meta("b", "f", Some(fork));
-        b.agent = Agent::Claude;
-        b.content_hash = "h2".into();
-        b.parent_timeline = Some("a".into());
-
         let content_a = format!(
             "{}\n{}\n",
             claude_line("user", "old"),
@@ -1453,6 +1445,16 @@ mod tests {
             claude_line("user", "branch B"),
             claude_line("assistant", "done B")
         );
+        let mut a = meta("a", "f", None);
+        a.agent = Agent::Claude;
+        a.content_hash = sha256_hex(content_a.as_bytes());
+        a.size_bytes = content_a.len() as u64;
+        let mut b = meta("b", "f", Some(fork));
+        b.agent = Agent::Claude;
+        b.content_hash = sha256_hex(content_b.as_bytes());
+        b.size_bytes = content_b.len() as u64;
+        b.parent_timeline = Some("a".into());
+
         store
             .write_bundle(&SessionRecord::new(a, content_a.into_bytes()))
             .unwrap();

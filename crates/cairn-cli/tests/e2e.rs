@@ -202,7 +202,8 @@ fn claude_push_pull_restore_round_trip() {
     run_args(&env, &["push"]);
     let bundle = env.store.join("threads").join("claude").join(id);
     assert!(bundle.join("meta.json").exists());
-    assert!(bundle.join("session.jsonl.gz").exists());
+    assert!(bundle.join("chunks.json").exists());
+    assert!(bundle.join("chunks").exists());
 
     run_args_with_claude(&env, &env.claude_b, &["pull"]);
     assert!(

@@ -103,7 +103,11 @@ attachments = false
 max_text_block_bytes = 8192
 ```
 
-Codex sessions are currently stored as full rollouts (gzip) until trimming is validated against live resumes.
+Sessions are stored as append-only gzip chunks plus a `chunks.json` cursor
+(head hash, line and byte counts). A push appends only the new tail; if the
+local prefix no longer matches, that session is rebuilt from scratch. Codex
+rollouts are still stored in full (no trimming) until trimming is validated
+against live resumes.
 
 ## WSL (file-level)
 
