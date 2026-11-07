@@ -292,8 +292,19 @@ pub fn rewrite_cwd(content: &[u8], old: &str, new: &str) -> Vec<u8> {
     if old.is_empty() || old == new {
         return content.to_vec();
     }
+    rewrite_strings(content, &path_variants(old), new)
+}
 
-    let variants = path_variants(old);
+/// Replace every JSON string occurrence of one identifier with another.
+/// Used when a restored timeline needs a fresh native session id.
+pub fn replace_native_id(content: &[u8], old: &str, new: &str) -> Vec<u8> {
+    if old.is_empty() || old == new {
+        return content.to_vec();
+    }
+    rewrite_strings(content, &[old.to_string()], new)
+}
+
+fn rewrite_strings(content: &[u8], variants: &[String], new: &str) -> Vec<u8> {
     let mut out = Vec::with_capacity(content.len());
     for chunk in content.split_inclusive(|b| *b == b'\n') {
         let (line, has_cr, has_newline) = split_line_ending(chunk);
@@ -303,14 +314,14 @@ pub fn rewrite_cwd(content: &[u8], old: &str, new: &str) -> Vec<u8> {
         }
         match serde_json::from_slice::<Value>(line) {
             Ok(mut value) => {
-                rewrite_value(&mut value, &variants, new);
+                rewrite_value(&mut value, variants, new);
                 if serde_json::to_writer(&mut out, &value).is_err() {
                     out.extend_from_slice(line);
                 }
             }
             Err(_) => {
                 let mut text = String::from_utf8_lossy(line).to_string();
-                for variant in &variants {
+                for variant in variants {
                     text = text.replace(variant, new);
                 }
                 out.extend_from_slice(text.as_bytes());
@@ -503,5 +514,15 @@ mod tests {
         let value: Value = serde_json::from_slice(&out).unwrap();
         assert_eq!(value["cwd"], "/work/proj2");
         assert_eq!(value["text"], "/work/proj2");
+    }
+
+    #[test]
+    fn replace_native_id_updates_every_string_and_keeps_crlf() {
+        let raw = b"{\"sessionId\":\"old-id\",\"nested\":[\"old-id\"]}\r\n{\"id\":\"old-id\"}\r\n";
+        let out = replace_native_id(raw, "old-id", "new-id");
+        let text = String::from_utf8(out).unwrap();
+        assert!(!text.contains("old-id"));
+        assert_eq!(text.matches("new-id").count(), 3);
+        assert_eq!(text.matches("\r\n").count(), 2);
     }
 }

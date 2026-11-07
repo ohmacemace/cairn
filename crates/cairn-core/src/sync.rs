@@ -455,7 +455,7 @@ impl SyncEngine {
         cwd: Option<&Path>,
         dry_run: bool,
     ) -> Result<ImportOutcome> {
-        let record = self.store.read_bundle(agent, timeline_id)?;
+        let mut record = self.store.read_bundle(agent, timeline_id)?;
         let target_cwd = match cwd {
             Some(path) => path.to_path_buf(),
             None => self.config.resolve_cwd(&record.meta),
@@ -474,9 +474,10 @@ impl SyncEngine {
             std::fs::create_dir_all(&target_cwd)?;
         }
 
-        // A fork keeps the parent's native id in the store. It cannot be
-        // materialized next to another timeline that already owns that native
-        // id on this machine without overwriting it.
+        // A fork shares its native id with the parent. If that id is already
+        // owned by another timeline on this machine, materialize the fork
+        // under a fresh native id and keep it as a new local timeline.
+        let mut copied = false;
         if !record.content.is_empty() {
             let sibling_in_store = self.store.list_bundles()?.iter().any(|meta| {
                 meta.agent == agent
@@ -491,17 +492,33 @@ impl SyncEngine {
                     if local.meta.content_hash != record.meta.content_hash
                         && local.meta.timeline_id != record.meta.timeline_id
                     {
-                        return Err(Error::Config(format!(
-                            "原生会话 {} 已被本机另一条时间线占用。请先备份或移除本机会话，再恢复这条时间线。",
-                            record.meta.native_id
-                        )));
+                        record = copy_as_new_timeline(&record, &self.config);
+                        copied = true;
                     }
                 }
             }
         }
 
         let adapter = self.adapter_for_meta(&record.meta)?;
-        let outcome = adapter.import(&record, &target_cwd)?;
+        let mut outcome = adapter.import(&record, &target_cwd)?;
+        if copied {
+            self.store.write_bundle(&record)?;
+            let message = format!(
+                "cairn: restore {} as new timeline {} on {}",
+                record.meta.parent_timeline.clone().unwrap_or_default(),
+                record.meta.native_id,
+                self.config.machine_name
+            );
+            let _ = crate::git::commit_all(&self.store.root, &message)?;
+            let note = format!(
+                "本机原生 ID 已被另一条时间线占用，已分配新的原生 ID {} 并保存为新时间线",
+                record.meta.native_id
+            );
+            outcome.note = Some(match outcome.note {
+                Some(previous) => format!("{previous}; {note}"),
+                None => note,
+            });
+        }
 
         // Record the restore so a later local append can be recognized as
         // divergence instead of overwriting the store copy. Forks also need a
@@ -552,6 +569,59 @@ impl SyncEngine {
 
     pub fn resume_command(&self, agent: Agent, native_id: &str) -> Result<Vec<String>> {
         Ok(self.adapter_for(agent)?.resume_command(native_id))
+    }
+}
+
+fn copy_as_new_timeline(record: &SessionRecord, config: &Config) -> SessionRecord {
+    let new_id = uuid::Uuid::new_v4().to_string();
+    let content = crate::paths::replace_native_id(&record.content, &record.meta.native_id, &new_id);
+    let mut meta = record.meta.clone();
+    let parent = meta.timeline_id.clone();
+    let inherited_fork = meta.fork_point.clone();
+    meta.timeline_id = new_id.clone();
+    meta.native_id = new_id;
+    meta.source_path = None;
+    meta.created_at = now_ts();
+    meta.updated_at = now_ts();
+    meta.machine_id = config.machine_id.clone();
+    meta.machine_name = config.machine_name.clone();
+    meta.archived = false;
+    meta.content_hash = crate::hash::sha256_hex(&content);
+    meta.size_bytes = content.len() as u64;
+    meta.parent_timeline = Some(parent.clone());
+    meta.fork_point = Some(match inherited_fork {
+        Some(mut fork) => {
+            fork.parent_timeline = parent;
+            fork.forked_at = now_ts();
+            fork.forked_by = config.machine_id.clone();
+            fork
+        }
+        None => crate::model::ForkPoint {
+            parent_timeline: parent,
+            line: count_lines(&record.content),
+            byte: record.content.len() as u64,
+            hash: format!("sha256:{}", crate::hash::sha256_hex(&record.content)),
+            message_id: None,
+            forked_at: now_ts(),
+            forked_by: config.machine_id.clone(),
+        },
+    });
+    SessionRecord {
+        meta,
+        content,
+        sidecars: Vec::new(),
+    }
+}
+
+fn count_lines(bytes: &[u8]) -> u64 {
+    if bytes.is_empty() {
+        return 0;
+    }
+    let newlines = bytes.iter().filter(|byte| **byte == b'\n').count() as u64;
+    if bytes.last() == Some(&b'\n') {
+        newlines
+    } else {
+        newlines + 1
     }
 }
 

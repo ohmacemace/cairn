@@ -305,9 +305,23 @@ impl Store {
 
     pub fn find(&self, agent: Agent, id: &str) -> Result<Option<SessionMeta>> {
         let bundles = self.list_bundles()?;
-        Ok(bundles.into_iter().find(|m| {
-            m.agent == agent && (m.native_id == id || m.timeline_id == id || m.family_id == id)
-        }))
+        // Timeline ids are unambiguous; native ids are shared by forks, so
+        // check them only after an exact timeline match.
+        if let Some(meta) = bundles
+            .iter()
+            .find(|meta| meta.agent == agent && meta.timeline_id == id)
+        {
+            return Ok(Some(meta.clone()));
+        }
+        if let Some(meta) = bundles
+            .iter()
+            .find(|meta| meta.agent == agent && meta.native_id == id)
+        {
+            return Ok(Some(meta.clone()));
+        }
+        Ok(bundles
+            .into_iter()
+            .find(|meta| meta.agent == agent && meta.family_id == id))
     }
 }
 

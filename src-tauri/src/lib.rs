@@ -464,7 +464,14 @@ async fn restore_session(
         .map_err(err)?;
 
         let meta = if let (Some(agent), Some(timeline)) = (parsed_agent, timeline_id.as_deref()) {
-            engine.store.find(agent, timeline).map_err(err)?
+            let requested = engine.store.find(agent, timeline).map_err(err)?;
+            if requested.as_ref().map(|meta| meta.native_id.as_str())
+                != Some(outcome.native_id.as_str())
+            {
+                engine.store.find(agent, &outcome.native_id).map_err(err)?
+            } else {
+                requested
+            }
         } else {
             match parsed_agent {
                 Some(agent) => engine.store.find(agent, &outcome.native_id).map_err(err)?,

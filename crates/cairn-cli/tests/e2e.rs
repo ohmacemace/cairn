@@ -508,6 +508,142 @@ fn stale_local_push_does_not_overwrite_remote() {
 }
 
 #[test]
+fn restoring_a_fork_allocates_a_new_native_id() {
+    let env = TestEnv::new();
+    let project = env.root.join("restore-fork-project");
+    fs::create_dir_all(&project).unwrap();
+    let id = "77777777-7777-4777-8777-777777777777";
+    write_claude_session(&env.claude_a, &project, id, false);
+
+    run_args(
+        &env,
+        &[
+            "init",
+            "--store",
+            env.store.to_str().unwrap(),
+            "--name",
+            "machine-a",
+        ],
+    );
+    run_args(&env, &["push"]);
+
+    let config_b = env.root.join("config-b.toml");
+    let state_b = env.root.join("state-b.json");
+    let claude_b = env.root.join("claude-b");
+    let mut init_b = env.command_for(&config_b, &state_b, &claude_b);
+    init_b.args([
+        "init",
+        "--store",
+        env.store.to_str().unwrap(),
+        "--name",
+        "machine-b",
+    ]);
+    run(&mut init_b);
+    let mut restore_b = env.command_for(&config_b, &state_b, &claude_b);
+    restore_b.args([
+        "restore",
+        id,
+        "--agent",
+        "claude",
+        "--cwd",
+        project.to_str().unwrap(),
+    ]);
+    run(&mut restore_b);
+
+    append_claude_turn(&env.claude_a, &project, id, "change from A");
+    append_claude_turn(&claude_b, &project, id, "change from B");
+    let mut push_a = env.command_for(&env.config, &env.state, &env.claude_a);
+    push_a.arg("push");
+    run(&mut push_a);
+    let mut push_b = env.command_for(&config_b, &state_b, &claude_b);
+    push_b.arg("push");
+    run(&mut push_b);
+
+    let claude_dir = env.store.join("threads").join("claude");
+    let mut fork_timeline = None;
+    for entry in fs::read_dir(&claude_dir).unwrap().flatten() {
+        let meta_path = entry.path().join("meta.json");
+        if !meta_path.exists() {
+            continue;
+        }
+        let meta: Value = serde_json::from_slice(&fs::read(&meta_path).unwrap()).unwrap();
+        if meta["parent_timeline"].as_str() == Some(id) {
+            fork_timeline = Some(meta["timeline_id"].as_str().unwrap().to_string());
+        }
+    }
+    let fork_timeline = fork_timeline.expect("missing fork");
+
+    // Machine C restores the parent first, then the fork. The fork must be
+    // materialized under a fresh native id instead of overwriting the parent.
+    let config_c = env.root.join("config-c.toml");
+    let state_c = env.root.join("state-c.json");
+    let claude_c = env.root.join("claude-c");
+    let mut init_c = env.command_for(&config_c, &state_c, &claude_c);
+    init_c.args([
+        "init",
+        "--store",
+        env.store.to_str().unwrap(),
+        "--name",
+        "machine-c",
+    ]);
+    run(&mut init_c);
+    let mut restore_parent = env.command_for(&config_c, &state_c, &claude_c);
+    restore_parent.args([
+        "restore",
+        id,
+        "--agent",
+        "claude",
+        "--cwd",
+        project.to_str().unwrap(),
+    ]);
+    run(&mut restore_parent);
+    let mut restore_fork = env.command_for(&config_c, &state_c, &claude_c);
+    restore_fork.args([
+        "restore",
+        &fork_timeline,
+        "--agent",
+        "claude",
+        "--cwd",
+        project.to_str().unwrap(),
+    ]);
+    let out = run(&mut restore_fork);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("新的原生 ID"),
+        "expected a new-native-id notice, got: {stdout}"
+    );
+
+    let before: Vec<Value> = fs::read_dir(&claude_dir)
+        .unwrap()
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path().join("meta.json");
+            if !path.exists() {
+                return None;
+            }
+            serde_json::from_slice::<Value>(&fs::read(path).ok()?).ok()
+        })
+        .collect();
+    let copied = before
+        .iter()
+        .find(|meta| meta["parent_timeline"].as_str() == Some(fork_timeline.as_str()))
+        .expect("missing copied timeline");
+    let copied_native = copied["native_id"].as_str().unwrap();
+    assert_ne!(copied_native, id);
+    assert_eq!(copied["family_id"].as_str().unwrap(), id);
+
+    let project_dir = claude_c.join("projects").join(encode(&project));
+    assert!(project_dir.join(format!("{id}.jsonl")).exists());
+    assert!(project_dir.join(format!("{copied_native}.jsonl")).exists());
+
+    let mut status_c = env.command_for(&config_c, &state_c, &claude_c);
+    status_c.args(["status", "--json"]);
+    let out = run(&mut status_c);
+    let status: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(status["pending_push"].as_array().unwrap().len(), 0);
+}
+
+#[test]
 fn wsl_file_level_round_trip() {
     let env = TestEnv::new();
     let fake_root = env.root.join("fake-wsl");

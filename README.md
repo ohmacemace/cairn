@@ -78,6 +78,8 @@ large store never rewrites every agent session on every sync.
 
 Session files are append-only. When two machines continue the same session, the first push keeps the original timeline and the later push is stored as a fork. Cairn records the fork point (line, byte offset, prefix hash) at the moment divergence is detected, so later operations do not have to rescan the whole history. Session JSONL is never text-merged by Git.
 
+A fork shares its native session id with the parent in the store. If that id is already owned by another timeline on the machine doing the restore, Cairn materializes the fork under a fresh native id and keeps it as a new local timeline instead of overwriting the existing session.
+
 To combine two timelines, open the session in the desktop app and choose **Merge timelines**:
 
 1. Cairn extracts a structured material pack from the fork point onward: user requests, assistant results, changed files, commands, errors, and existing compaction summaries.
