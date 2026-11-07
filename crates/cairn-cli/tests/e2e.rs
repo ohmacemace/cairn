@@ -429,6 +429,85 @@ fn divergent_push_creates_fork_with_point() {
 }
 
 #[test]
+fn stale_local_push_does_not_overwrite_remote() {
+    let env = TestEnv::new();
+    let project = env.root.join("stale-project");
+    fs::create_dir_all(&project).unwrap();
+    let id = "66666666-6666-4666-8666-666666666666";
+    write_claude_session(&env.claude_a, &project, id, false);
+
+    run_args(
+        &env,
+        &[
+            "init",
+            "--store",
+            env.store.to_str().unwrap(),
+            "--name",
+            "machine-a",
+        ],
+    );
+    run_args(&env, &["push"]);
+
+    let config_b = env.root.join("config-b.toml");
+    let state_b = env.root.join("state-b.json");
+    let claude_b = env.root.join("claude-b");
+    let mut init_b = env.command_for(&config_b, &state_b, &claude_b);
+    init_b.args([
+        "init",
+        "--store",
+        env.store.to_str().unwrap(),
+        "--name",
+        "machine-b",
+    ]);
+    run(&mut init_b);
+    let mut restore_b = env.command_for(&config_b, &state_b, &claude_b);
+    restore_b.args([
+        "restore",
+        id,
+        "--agent",
+        "claude",
+        "--cwd",
+        project.to_str().unwrap(),
+    ]);
+    run(&mut restore_b);
+
+    append_claude_turn(&env.claude_a, &project, id, "change from A");
+    let mut push_a = env.command_for(&env.config, &env.state, &env.claude_a);
+    push_a.arg("push");
+    run(&mut push_a);
+
+    let meta_path = env
+        .store
+        .join("threads")
+        .join("claude")
+        .join(id)
+        .join("meta.json");
+    let before: Value = serde_json::from_slice(&fs::read(&meta_path).unwrap()).unwrap();
+
+    let mut status_b = env.command_for(&config_b, &state_b, &claude_b);
+    status_b.args(["status", "--json"]);
+    let out = run(&mut status_b);
+    let status: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(status["pending_pull"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|key| key.as_str() == Some(format!("claude/{id}").as_str())));
+
+    let mut push_b = env.command_for(&config_b, &state_b, &claude_b);
+    push_b.arg("push");
+    let out = run(&mut push_b);
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("behind"),
+        "expected a behind-store warning, got: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let after: Value = serde_json::from_slice(&fs::read(&meta_path).unwrap()).unwrap();
+    assert_eq!(before["content_hash"], after["content_hash"]);
+}
+
+#[test]
 fn wsl_file_level_round_trip() {
     let env = TestEnv::new();
     let fake_root = env.root.join("fake-wsl");

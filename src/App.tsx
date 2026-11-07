@@ -939,7 +939,14 @@ function MergeModal({
             <span>时间线 A</span>
             <select
               value={a}
-              onChange={(event) => setA(event.target.value)}
+              onChange={(event) => {
+                setA(event.target.value);
+                setPhase("idle");
+                setBrief("");
+                setMaterial(null);
+                setCommand("");
+                setError(null);
+              }}
               disabled={busy}
             >
               {candidates.map((timeline) => (
@@ -954,7 +961,14 @@ function MergeModal({
             <span>时间线 B</span>
             <select
               value={b}
-              onChange={(event) => setB(event.target.value)}
+              onChange={(event) => {
+                setB(event.target.value);
+                setPhase("idle");
+                setBrief("");
+                setMaterial(null);
+                setCommand("");
+                setError(null);
+              }}
               disabled={busy}
             >
               <option value="">选择另一条时间线</option>

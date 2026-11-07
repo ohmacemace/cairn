@@ -132,7 +132,15 @@ impl SyncEngine {
 
         // Apply the local timeline mapping before anything compares keys.
         // Without it, a forked session keeps looking like its parent.
-        let state = SyncState::load(&Config::state_path()).unwrap_or_default();
+        let state = match SyncState::load(&Config::state_path()) {
+            Ok(state) => state,
+            Err(err) => {
+                report
+                    .warnings
+                    .push(format!("local sync state unavailable: {err}"));
+                SyncState::default()
+            }
+        };
         for record in &mut report.records {
             let key = SyncState::native_key(record.meta.agent, &record.meta.native_id);
             if let Some(timeline_id) = state.local_timelines.get(&key) {
@@ -254,15 +262,26 @@ impl SyncEngine {
                     );
                 }
                 Some(remote_meta) => {
-                    let both_changed = known
-                        .as_ref()
-                        .map(|k| {
-                            k.store_hash != remote_meta.content_hash
-                                && k.local_hash != record.meta.content_hash
-                        })
-                        .unwrap_or(false);
+                    let (remote_changed, local_changed) = match known.as_ref() {
+                        Some(k) => (
+                            k.store_hash != remote_meta.content_hash,
+                            k.local_hash != record.meta.content_hash,
+                        ),
+                        // Without a local baseline we cannot prove the remote
+                        // copy is an ancestor of ours. Preserve both.
+                        None => (true, true),
+                    };
 
-                    if both_changed {
+                    if remote_changed && !local_changed {
+                        report.warnings.push(format!(
+                            "{} {}: local copy is behind the store; restore before pushing",
+                            record.meta.agent, record.meta.native_id
+                        ));
+                        report.unchanged += 1;
+                        continue;
+                    }
+
+                    if remote_changed && local_changed {
                         let mut fork = record.clone();
                         let new_timeline = uuid::Uuid::new_v4().to_string();
                         preserve_store_meta(&mut fork, remote_meta);
@@ -505,6 +524,7 @@ impl SyncEngine {
 
         let remote = self.store.list_bundles()?;
         report.remote = remote.len();
+        let state = SyncState::load(&Config::state_path()).unwrap_or_default();
 
         let local_by_key: BTreeMap<String, &SessionRecord> = scan
             .records
@@ -524,6 +544,17 @@ impl SyncEngine {
             match (local_by_key.get(&key), remote_by_key.get(&key)) {
                 (Some(local), Some(remote)) => {
                     if local.meta.content_hash == remote.content_hash {
+                        continue;
+                    }
+                    if let Some(known) = state.timelines.get(&key) {
+                        let remote_changed = known.store_hash != remote.content_hash;
+                        let local_changed = known.local_hash != local.meta.content_hash;
+                        match (remote_changed, local_changed) {
+                            (true, false) => report.pending_pull.push(key.clone()),
+                            (false, true) => report.pending_push.push(key.clone()),
+                            (true, true) => report.pending_push.push(key.clone()),
+                            (false, false) => {}
+                        }
                         continue;
                     }
                     if local.meta.updated_at > remote.updated_at {

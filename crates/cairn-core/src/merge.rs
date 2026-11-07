@@ -338,14 +338,26 @@ fn background_messages(
     fork_line: u64,
 ) -> Vec<String> {
     let mut messages = extract_messages(agent, content_a, 0, Some(fork_line));
+    let mut side = extract_side(agent, content_a, 0, Some(fork_line));
     if messages.is_empty() {
         messages = extract_messages(agent, content_b, 0, Some(fork_line));
+        side = extract_side(agent, content_b, 0, Some(fork_line));
+    }
+
+    let mut out = Vec::new();
+    if let Some(summary) = side.summaries.last() {
+        out.push(format!(
+            "摘要：{}",
+            truncate_chars(summary, ASSISTANT_CHARS)
+        ));
     }
     let start = messages.len().saturating_sub(4);
-    messages[start..]
-        .iter()
-        .map(|(role, text)| format!("{role}：{}", truncate_chars(text, MESSAGE_CHARS)))
-        .collect()
+    out.extend(
+        messages[start..]
+            .iter()
+            .map(|(role, text)| format!("{role}：{}", truncate_chars(text, MESSAGE_CHARS))),
+    );
+    out
 }
 
 fn extract_messages(

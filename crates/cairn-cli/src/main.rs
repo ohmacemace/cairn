@@ -48,7 +48,7 @@ enum Commands {
         #[arg(long)]
         dry_run: bool,
     },
-    /// Restore sessions from the store into local agent homes.
+    /// Refresh session store metadata without materializing sessions.
     Pull {
         #[arg(long)]
         dry_run: bool,
